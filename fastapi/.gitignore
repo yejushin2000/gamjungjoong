@@ -1,0 +1,68 @@
+# Python 관련
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 가상환경
+venv/
+ENV/
+.env
+.venv
+env/
+env.bak/
+venv.bak/
+
+# IDE 관련
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# 로그 파일
+*.log
+logs/
+
+# 업로드 및 처리된 이미지 (필요에 따라 주석 처리)
+uploads/
+processed/
+
+# API 키 및 민감한 정보
+.env
+config.ini
+secret.py
+
+# 데이터베이스
+*.db
+*.sqlite
+*.sqlite3
+
+# 모델 파일 (크기가 크다면)
+# models/
+
+# 임시 파일
+tmp/
+temp/
+.temp/
+
+# 기타
+*.bak
+*.tmp
+*.temp
