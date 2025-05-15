@@ -56,11 +56,15 @@ if not os.path.exists(classification_model_path):
 if not os.path.exists(detection_model_path):
     print(f"Warning: Detection model not found at {detection_model_path}")
 
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
 # 모델 관리 클래스 정의
 class ModelManager:
     def __init__(self):
         self.classification_session = None
         self.detection_session = None
+        self.img_size = 640
         self.init_models()
         
         # 분류 및 탐지 클래스 이름 목록
@@ -112,54 +116,66 @@ class ModelManager:
             print(f"Classification error: {e}")
             return {"class": "error", "confidence": 0.0}
     
-    def detect_objects(self, image_array):
+    
+    
+    def detect_objects(self, image_array, conf_threshold=0.3, iou_threshold=0.45):
         """탐지 모델을 사용해 이미지에서 객체 탐지"""
         if self.detection_session is None:
             return []
 
         try:
-            input_image = self.preprocess_image(image_array)
+            input_image = self.preprocess_image(image_array)  # (1, 3, IMG_SIZE, IMG_SIZE)
             original_height, original_width = image_array.shape[:2]
             input_name = self.detection_session.get_inputs()[0].name
             outputs = self.detection_session.run(None, {input_name: input_image})
+
+            detections_raw = outputs[0]  # 예: (1, 8400, 10) or (1, 10, 8400)
             
+            # 출력 shape 정리
+            if detections_raw.ndim == 3:
+                if detections_raw.shape[1] == len(self.detection_classes) + 5:
+                    detections = detections_raw[0].T  # (8400, 10)
+                else:
+                    detections = detections_raw[0]  # (8400, 10)
+            else:
+                raise ValueError(f"Unexpected output shape: {detections_raw.shape}")
+
             boxes = []
-            detections_raw = outputs[0]  # shape: (1, 10, 8400)
-            
-            # Transpose to (8400, 10)
-            detections = np.transpose(detections_raw[0], (1, 0))
 
             for detection in detections:
                 if len(detection) < 6:
                     continue
 
-                object_confidence = float(detection[4])
-                if object_confidence < 0.5:
+                # box 정보
+                cx, cy, w, h = detection[:4]
+
+                # objectness score (sigmoid 적용)
+                obj_score = sigmoid(detection[4])
+
+                # class scores (sigmoid 후 가장 높은 것 선택)
+                class_logits = detection[5:]
+                class_probs = sigmoid(class_logits)
+                class_id = int(np.argmax(class_probs))
+                class_score = class_probs[class_id]
+
+                # 최종 confidence = objectness * class score
+                confidence = obj_score * class_score
+
+                if confidence < conf_threshold or class_id >= len(self.detection_classes):
                     continue
 
-                class_scores = detection[5:]
-                if len(class_scores) == 0:
-                    continue
-
-                class_id = int(np.argmax(class_scores))
-                class_confidence = float(class_scores[class_id])
-
-                if class_confidence < 0.5 or class_id >= len(self.detection_classes):
-                    continue
-
-                # Bounding box 계산
-                x, y, w, h = detection[:4]
-                x_min = int((x - w / 2) * original_width)
-                y_min = int((y - h / 2) * original_height)
-                x_max = int((x + w / 2) * original_width)
-                y_max = int((y + h / 2) * original_height)
-
+                # 원본 크기에 맞게 좌표 변환
+                x_min = int((cx - w / 2) / self.img_size * original_width)
+                y_min = int((cy - h / 2) / self.img_size * original_height)
+                x_max = int((cx + w / 2) / self.img_size * original_width)
+                y_max = int((cy + h / 2) / self.img_size * original_height)
+                print("인식좌표: ", x_min, y_min, x_max, y_max)
                 boxes.append({
                     "class": self.detection_classes[class_id],
-                    "confidence": class_confidence,
+                    "confidence": float(confidence),
                     "bbox": [x_min, y_min, x_max, y_max]
                 })
-
+                print(boxes)
             return boxes
 
         except Exception as e:
@@ -449,7 +465,7 @@ async def upload_info(
             })
             
             # 객체 탐지
-            detections = model_manager.detect_objects(img)
+            detections = model_manager.detect_objects(img) # ex -> boxes : [{'class': 'Scratch', 'confidence': 0.3044613301753998, 'bbox': [17, 119, 171, 247]}] 이런걸 받음
             if detections:
                 detection_img = model_manager.draw_detections(img.copy(), detections)
                 detection_filename = f"detection_{unique_filename}"
@@ -461,6 +477,8 @@ async def upload_info(
                     "detection_url": detection_url,
                     "detections": detections
                 })
+            else:
+                print("멀쩡한 노트북이거나, 노트북이 없거나")
         
         # 텍스트 리포트 생성
         combined_text = "Product Analysis Report:\n\n"
