@@ -78,7 +78,7 @@ async function parseMultipartBlob(blob: Blob): Promise<{
       // 바이너리 Blob 생성
       const raw = new TextEncoder().encode(body);
       const blob = new Blob([raw], { type: contentType || "application/octet-stream" });
-      imageMap[filenameMatch[1]] = blob;
+      imageMap[filenameMatch[1]] = blob; // 바이너리
     }
   }
 
