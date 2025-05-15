@@ -1,6 +1,7 @@
+import mimetypes
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from typing import List, Optional
 import os
 import shutil
@@ -56,8 +57,75 @@ if not os.path.exists(classification_model_path):
 if not os.path.exists(detection_model_path):
     print(f"Warning: Detection model not found at {detection_model_path}")
 
+# 객체탐지 모델 데이터 후처리 및 관리용 함수들
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
+
+# IoU 계산 함수 추가 - 얼마나 겹치니?
+def calculate_iou(box1, box2):
+    """두 박스의 IoU(Intersection over Union) 계산"""
+    # box = [x_min, y_min, x_max, y_max]
+    x1_min, y1_min, x1_max, y1_max = box1
+    x2_min, y2_min, x2_max, y2_max = box2
+    
+    # 교집합 영역 계산
+    x_intersection = max(0, min(x1_max, x2_max) - max(x1_min, x2_min))
+    y_intersection = max(0, min(y1_max, y2_max) - max(y1_min, y2_min))
+    intersection_area = x_intersection * y_intersection
+    
+    # 합집합 영역 계산
+    box1_area = (x1_max - x1_min) * (y1_max - y1_min)
+    box2_area = (x2_max - x2_min) * (y2_max - y2_min)
+    union_area = box1_area + box2_area - intersection_area
+    
+    # IoU 계산
+    if union_area == 0:
+        return 0
+    return intersection_area / union_area
+
+# 멀티파트 형식으로 응답을 보내는 함수
+def create_multipart_response(json_data, image_files):
+    boundary = "boundary"
+    
+    # 멀티파트 응답 생성
+    def generate():
+        # JSON 데이터 부분
+        yield f"--{boundary}\r\n"
+        yield f"Content-Disposition: form-data; name=\"json_data\"\r\n"
+        yield f"Content-Type: application/json\r\n\r\n"
+        yield json.dumps(json_data)
+        yield f"\r\n"
+        
+        # 각 이미지 파일들 추가
+        for img_name, img_path in image_files:
+            try:
+                # 이미지 파일 읽기
+                with open(img_path, "rb") as f:
+                    img_data = f.read()
+                
+                # 파일의 MIME 타입 확인
+                mime_type, _ = mimetypes.guess_type(img_path)
+                if not mime_type:
+                    mime_type = "application/octet-stream"
+                
+                # 멀티파트 형식으로 이미지 데이터 추가
+                yield f"--{boundary}\r\n"
+                yield f"Content-Disposition: form-data; name=\"{img_name}\"; filename=\"{os.path.basename(img_path)}\"\r\n"
+                yield f"Content-Type: {mime_type}\r\n\r\n"
+                yield img_data
+                yield f"\r\n"
+            except Exception as e:
+                print(f"Error reading image file {img_path}: {e}")
+        
+        # 멀티파트 종료
+        yield f"--{boundary}--\r\n"
+    
+    print("전송 완료!")
+    # StreamingResponse로 반환
+    return StreamingResponse(
+        generate(),
+        media_type=f"multipart/form-data; boundary={boundary}"
+    )
 
 # 모델 관리 클래스 정의
 class ModelManager:
@@ -69,7 +137,16 @@ class ModelManager:
         
         # 분류 및 탐지 클래스 이름 목록
         self.classification_classes = ["back", "front", "keyboard", "screen", "side"]
-        self.detection_classes = ["Crack", "Damaged Keys", "Damaged Screen", "Display Issues", "Scratch"]
+        self.detection_classes = ['Damaged Keys', 'Damaged Screen', 'Display Issues', 'Scratch', 'normal']
+
+        # 각 클래스별 색상 정의 (R, G, B 형식)
+        self.detection_colors = {
+            'Damaged Keys': (255, 0, 0),     # 빨강
+            'Damaged Screen': (0, 0, 255),   # 파랑
+            'Display Issues': (255, 165, 0), # 주황
+            'Scratch': (0, 255, 0),          # 초록
+            'normal': (128, 128, 128)        # 회색
+        }
     
     def init_models(self):
         # ONNX 모델 로드
@@ -116,7 +193,51 @@ class ModelManager:
             print(f"Classification error: {e}")
             return {"class": "error", "confidence": 0.0}
     
-    
+    def merge_boxes(self, boxes, iou_threshold=0.8):
+        """동일한 클래스의 겹치는 박스들을 하나로 병합"""
+        if not boxes:
+            return []
+            
+        # 클래스별로 박스를 그룹화
+        class_boxes = {}
+        for box in boxes:
+            class_name = box["class"]
+            if class_name not in class_boxes:
+                class_boxes[class_name] = []
+            class_boxes[class_name].append(box)
+        
+        merged_boxes = []
+        
+        # 각 클래스에 대해 박스 병합 수행
+        for class_name, class_specific_boxes in class_boxes.items():
+            # 신뢰도에 따라 내림차순 정렬
+            sorted_boxes = sorted(class_specific_boxes, key=lambda x: x["confidence"], reverse=True)
+            
+            while sorted_boxes:
+                best_box = sorted_boxes[0]
+                sorted_boxes.pop(0)
+                
+                i = 0
+                while i < len(sorted_boxes):
+                    current_box = sorted_boxes[i]
+                    iou = calculate_iou(best_box["bbox"], current_box["bbox"])
+                    
+                    if iou > iou_threshold:
+                        # 두 박스를 포함하는 최소 사각형 계산
+                        x1 = min(best_box["bbox"][0], current_box["bbox"][0])
+                        y1 = min(best_box["bbox"][1], current_box["bbox"][1])
+                        x2 = max(best_box["bbox"][2], current_box["bbox"][2])
+                        y2 = max(best_box["bbox"][3], current_box["bbox"][3])
+                        
+                        best_box["bbox"] = [x1, y1, x2, y2]
+                        # 신뢰도는 더 높은 쪽으로 유지
+                        sorted_boxes.pop(i)
+                    else:
+                        i += 1
+                
+                merged_boxes.append(best_box)
+        
+        return merged_boxes
     
     def detect_objects(self, image_array, conf_threshold=0.3, iou_threshold=0.45):
         """탐지 모델을 사용해 이미지에서 객체 탐지"""
@@ -169,31 +290,52 @@ class ModelManager:
                 y_min = int((cy - h / 2) / self.img_size * original_height)
                 x_max = int((cx + w / 2) / self.img_size * original_width)
                 y_max = int((cy + h / 2) / self.img_size * original_height)
-                print("인식좌표: ", x_min, y_min, x_max, y_max)
+                
                 boxes.append({
                     "class": self.detection_classes[class_id],
                     "confidence": float(confidence),
                     "bbox": [x_min, y_min, x_max, y_max]
                 })
-                print(boxes)
-            return boxes
+            
+            # 겹치는 박스 병합 (IoU 80% 이상)
+            merged_boxes = self.merge_boxes(boxes, iou_threshold=0.8)
+            
+            return merged_boxes
 
         except Exception as e:
             print(f"Detection error: {e}")
             return []
     
     def draw_detections(self, image, detections):
-        """탐지된 객체에 대한 바운딩 박스를 이미지에 그리기"""
-        image_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-        draw = ImageDraw.Draw(image_pil)
+        """탐지된 객체에 대한 바운딩 박스를 이미지에 그리기 (클래스별 색상 적용)"""
+        image_copy = image.copy()
         
         for detection in detections:
+            class_name = detection["class"]
             bbox = detection["bbox"]
-            label = f"{detection['class']} {detection['confidence']:.2f}"
-            draw.rectangle(bbox, outline="red", width=2)
-            draw.text((bbox[0], bbox[1] - 10), label, fill="red")
+            confidence = detection["confidence"]
+            
+            # 클래스에 따른 색상 선택 (RGB -> BGR 변환)
+            color = self.detection_colors.get(class_name, (255, 0, 0))  # 기본값은 빨간색
+            color_bgr = (color[2], color[1], color[0])  # RGB -> BGR
+            
+            # 바운딩 박스 그리기
+            x_min, y_min, x_max, y_max = bbox
+            cv2.rectangle(image_copy, (x_min, y_min), (x_max, y_max), color_bgr, 2)
+            
+            # 텍스트 준비
+            label = f"{class_name} {confidence:.2f}"
+            
+            # 텍스트 크기 계산
+            (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            
+            # 텍스트 배경 그리기
+            cv2.rectangle(image_copy, (x_min, y_min - text_height - 10), (x_min + text_width, y_min), color_bgr, -1)
+            
+            # 텍스트 그리기 (흰색으로)
+            cv2.putText(image_copy, label, (x_min, y_min - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        return cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
+        return image_copy
 
 # 모델 매니저 인스턴스 생성
 model_manager = ModelManager()
@@ -428,7 +570,7 @@ def read_root():
 
 # 이미지 업로드 및 처리 엔드포인트
 @app.post("/upload-info")
-async def upload_info(
+async def upload_info_multipart(
     images: List[UploadFile] = File(...),
     product_name: str = Form(...),
     price: str = Form(...),
@@ -438,87 +580,68 @@ async def upload_info(
         image_urls = []
         classification_results = []
         detection_image_urls = []
+        image_files = []  # 응답에 포함될 이미지 파일 목록
         
         for image in images:
             # 고유 파일명 생성
             file_extension = os.path.splitext(image.filename)[1]
             unique_filename = f"{uuid.uuid4()}{file_extension}"
-            filepath = os.path.join(UPLOAD_DIR, unique_filename)
             
-            # 파일 저장
-            with open(filepath, "wb") as buffer:
-                shutil.copyfileobj(image.file, buffer)
-            
-            image_url = f"/uploads/{unique_filename}"
+            # 이미지 내용 읽기
+            content = await image.read()
+            image_array = np.frombuffer(content, np.uint8)
+            img = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+
+            if img is None:
+                print(f"Failed to load image: {image.filename}")
+                continue
+                
+            # 원본 이미지 저장 
+            original_filename = f"{unique_filename}" 
+            original_filepath = os.path.join(UPLOAD_DIR, original_filename)
+            cv2.imwrite(original_filepath, img)
+            image_url = f"/uploads/{original_filename}"
             image_urls.append(image_url)
             
-            img = cv2.imread(filepath)
-            if img is None:
-                print(f"Failed to load image: {filepath}")
-                continue
+            # 멀티파트 응답을 위해 파일 목록에 추가
+            image_files.append((f"original_{original_filename}", original_filepath))
             
             # 이미지 분류
             classification_result = model_manager.classify_image(img)
             classification_results.append({
-                "image_url": image_url,
+                "filename": unique_filename,
                 "classification": classification_result
             })
             
             # 객체 탐지
-            detections = model_manager.detect_objects(img) # ex -> boxes : [{'class': 'Scratch', 'confidence': 0.3044613301753998, 'bbox': [17, 119, 171, 247]}] 이런걸 받음
+            detections = model_manager.detect_objects(img)
             if detections:
-                detection_img = model_manager.draw_detections(img.copy(), detections)
+                detection_img = model_manager.draw_detections(img, detections)
                 detection_filename = f"detection_{unique_filename}"
                 detection_filepath = os.path.join(PROCESSED_DIR, detection_filename)
                 cv2.imwrite(detection_filepath, detection_img)
                 detection_url = f"/processed/{detection_filename}"
                 detection_image_urls.append({
-                    "original_url": image_url,
-                    "detection_url": detection_url,
+                    "filename": unique_filename,
                     "detections": detections
                 })
+                
+                # 멀티파트 응답을 위해 파일 목록에 추가
+                image_files.append((f"detection_{detection_filename}", detection_filepath))
             else:
                 print("멀쩡한 노트북이거나, 노트북이 없거나")
         
-        # 텍스트 리포트 생성
-        combined_text = "Product Analysis Report:\n\n"
-        for result in classification_results:
-            combined_text += f"Item detected: {result['classification']['class']} (confidence: {result['classification']['confidence']:.2f})\n"
-        
-        combined_text += "\nDetection Summary:\n"
-        defect_count = 0
-        for detection_result in detection_image_urls:
-            for detection in detection_result["detections"]:
-                if detection["class"] in ["Crack", "Damaged Keys", "Damaged Screen", "Display Issues", "Scratch"]:
-                    defect_count += 1
-                    combined_text += f"Found {detection['class']} (confidence: {detection['confidence']:.2f})\n"
-        
-        if defect_count > 0:
-            combined_text += f"\nWarning: Detected {defect_count} potential defects that may affect product value."
-        else:
-            combined_text += "\nProduct appears to be in good condition with no visible defects."
-        
-        # 중간 로그 추가: 데이터 확인
-        print("Product Information:", {
-            "product_name": product_name,
-            "price": price,
-            "description": description
-        })
-        print("Image URLs:", image_urls)
-        print("Classification Results:", classification_results)
-        print("Detection Results:", detection_image_urls)
-        print("Combined Text:", combined_text)
-
-        # JSON 응답 반환
-        return JSONResponse(content={
+        # JSON 데이터 준비
+        json_data = {
             "product_name": product_name,
             "price": price,
             "description": description,
-            "image_urls": image_urls,
-            "combined_text": combined_text,
             "classification_results": classification_results,
             "detection_results": detection_image_urls
-        })
+        }
+        print("탐지된 이미지 파일들: ", image_files)
+        # 멀티파트 응답 생성 및 반환
+        return create_multipart_response(json_data, image_files)
     
     except Exception as e:
         print(f"Error processing upload: {e}")

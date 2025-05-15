@@ -22,11 +22,12 @@ interface ExtendedGoodsData extends ItemRegistParams {
   purchaseYear: string;
   purchaseMonth: string;
   // purchaseDate: string;
-  images: string[]; // base64 형식의 이미지 문자열 배열
+  images: File[]; // 
   imageUrls?: string[]; // 서버에서 반환받은 이미지 URL 배열
 }
 
 // fastapi로 이미지 전송, 결과 받아오는 코드
+
 // base64 문자열을 Blob 형식으로 변환하는 헬퍼 함수
 const dataURLtoBlob = (dataURL: string): Blob => {
   const arr = dataURL.split(',');
@@ -41,46 +42,71 @@ const dataURLtoBlob = (dataURL: string): Blob => {
   return new Blob([u8arr], { type: mime });
 };
 
-// 이미지를 서버에 업로드하고 이미지 URL 배열을 반환하는 함수
-const uploadImagesToServer = async (
-  images: string[],
-  productInfo: { name: string; price: string; description: string }
-): Promise<string[]> => {
-  if (images.length === 0) return [];
+// fastapi 서버에서 멀티파트로 받은 데이터를 분리하는 함수
+async function parseMultipartBlob(blob: Blob): Promise<{
+  jsonData: any;
+  imageMap: { [key: string]: Blob };
+}> {
+  const text = await blob.text();
 
-  try {
-    const formData = new FormData();
+  const boundaryMatch = text.match(/^--(.+?)\r\n/);
+  if (!boundaryMatch) throw new Error("boundary not found");
+  const boundary = boundaryMatch[1];
 
-    // 이미지 추가
-    images.forEach((imageDataUrl, index) => {
-      const blob = dataURLtoBlob(imageDataUrl);
-      formData.append('images', blob, `image_${index}.jpg`);
-    });
+  const parts = text.split(`--${boundary}`).filter(p => p.trim() && p.trim() !== "--");
 
-    // 🧩 추가: 제품 정보 필수
-    formData.append('product_name', productInfo.name);
-    formData.append('price', productInfo.price);
-    formData.append('description', productInfo.description);
+  const imageMap: { [key: string]: Blob } = {};
+  let jsonData: any = null;
 
-    const response = await fastapiInstance.post('/upload-info', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    });
+  for (let part of parts) {
+    const headerBodySplit = part.split("\r\n\r\n");
+    if (headerBodySplit.length < 2) continue;
 
-    console.log("✅ POST 요청 성공");
-    console.log("🔄 response 객체:", response);
-    console.log("🟢 response.data:", response.data);
-    return response.data.image_urls;
-  } catch (error) {
-    console.error("이미지 업로드 실패:", error);
-    throw new Error("이미지 업로드에 실패했습니다.");
+    const header = headerBodySplit[0];
+    const body = headerBodySplit.slice(1).join("\r\n\r\n").trimEnd();
+
+    const nameMatch = header.match(/name="(.+?)"/);
+    const filenameMatch = header.match(/filename="(.+?)"/);
+    const contentTypeMatch = header.match(/Content-Type: (.+)/);
+
+    const name = nameMatch?.[1];
+    const contentType = contentTypeMatch?.[1];
+
+    if (contentType?.includes("application/json")) {
+      jsonData = JSON.parse(body);
+    } else if (filenameMatch) {
+      // 바이너리 Blob 생성
+      const raw = new TextEncoder().encode(body);
+      const blob = new Blob([raw], { type: contentType || "application/octet-stream" });
+      imageMap[filenameMatch[1]] = blob;
+    }
   }
-};
 
-// 프론트엔드에 추가할 함수 - 기존 uploadImagesToServer 함수 아래에 추가
+  return { jsonData, imageMap };
+}
+
+// 이미지를 서버에 업로드하고 이미지 URL 배열을 반환하는 함수
+export async function uploadProductAndImages(images: File[], productInfo: { name: any; price: any; description: any; }) {
+  const formData = new FormData();
+  images.forEach((img) => formData.append("images", img));
+  formData.append("product_name", productInfo.name);
+  formData.append("price", productInfo.price);
+  formData.append("description", productInfo.description);
+
+  const response = await fastapiInstance.post("/upload-info", formData, {
+    responseType: "blob", // binary로 받기
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+
+  const { jsonData, imageMap } = await parseMultipartBlob(response.data);
+  console.log("json 데이터 : ", jsonData)
+  console.log("image 데이터 : ", imageMap)
+  return { jsonData, imageMap };
+}
+
+// 프론트엔드에 추가할 함수 - 기존 uploadProductAndImages 함수 아래에 추가
 const generateSalesContent = async (
-  images: string[],
+  images: File[],
   productInfo: { 
     name: string; 
     price: string; 
@@ -97,9 +123,8 @@ const generateSalesContent = async (
     const formData = new FormData();
 
     // 이미지 추가
-    images.forEach((imageDataUrl, index) => {
-      const blob = dataURLtoBlob(imageDataUrl);
-      formData.append('images', blob, `image_${index}.jpg`);
+    images.forEach((file, index) => {
+      formData.append('images', file);
     });
 
     // 제품 정보 추가
@@ -183,7 +208,7 @@ const GoodsRegistrationPage: React.FC = () => {
         purchaseYear:
           editItem.purchaseDate?.split("-")[0] || currentYear.toString(),
         purchaseMonth: editItem.purchaseDate?.split("-")[1] || "0",
-        images: [], // 빈 이미지 배열로 초기화
+        images: [] as File[],  // 빈 이미지 배열로 초기화
         imageUrls: editItem.imageUrls || [], // 기존 이미지 URL이 있으면 사용
       };
     } else {
@@ -200,7 +225,7 @@ const GoodsRegistrationPage: React.FC = () => {
         serialNumber: "",
         purchaseYear: currentYear.toString(),
         purchaseMonth: "0",
-        images: [], // 빈 이미지 배열로 초기화
+        images: [] as File[],  // 빈 이미지 배열로 초기화
       };
     }
   });
@@ -268,12 +293,27 @@ const GoodsRegistrationPage: React.FC = () => {
   // };
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [capturedImages, setCapturedImages] = useState<string[]>([]);
+  // 받아오는 이미지(객체탐지 결과)를 저장하는 const
+  const [imageMap, setImageMap] = useState<Record<string, Blob>>({});
   // 이미지 캡처 콜백
+  function dataURLtoFile(dataurl: string, filename: string): File {
+    const arr = dataurl.split(',');
+    const mime = arr[0].match(/:(.*?);/)![1];
+    const bstr = atob(arr[1]);
+    let n = bstr.length;
+    const u8arr = new Uint8Array(n);
+    while(n--) {
+      u8arr[n] = bstr.charCodeAt(n);
+    }
+    return new File([u8arr], filename, { type: mime });
+  }
   const handleImageCapture = (imageDataUrl: string) => {
-    setCapturedImages((prev) => [...prev, imageDataUrl]);
-    setFormData((prev) => ({
+    const file = dataURLtoFile(imageDataUrl, `capture-${Date.now()}.jpg`);
+
+    setCapturedImages(prev => [...prev, imageDataUrl]); // 화면용 URL
+    setFormData(prev => ({
       ...prev,
-      images: [...prev.images, imageDataUrl],
+      images: [...prev.images, file], // File 객체로 추가
     }));
   };
 
@@ -302,7 +342,31 @@ const GoodsRegistrationPage: React.FC = () => {
           ? formData.purchaseYear
           : `${formData.purchaseYear}-${formData.purchaseMonth.padStart(2, "0")}`;
 
-      // 판매글 생성 API 호출
+      
+      // 1. 먼저 이미지를 업로드하고 객체 탐지 결과 받아오기
+      let processedImageMap = {};
+      if (formData.images.length > 0) {
+        try {
+          // 기존에 정의한 uploadProductAndImages 함수 사용
+          const { jsonData, imageMap } = await uploadProductAndImages(formData.images, {
+            name: formData.title,
+            price: formData.price.toString(),
+            description: formData.description || "",
+          });
+          console.log("이미지 업로드 및 객체 탐지 결과:", jsonData);
+          
+          // 객체 탐지된 이미지를 상태에 저장
+          setImageMap(imageMap);
+          processedImageMap = imageMap;
+        } catch (error) {
+          console.error("이미지 업로드 실패:", error);
+          alert("이미지 업로드에 실패했습니다. 다시 시도해주세요.");
+          setIsGenerating(false);
+          return;
+        }
+      }
+
+      // 2. 판매글 생성 API 호출
       const { title, description, imageUrls } = await generateSalesContent(
         formData.images,
         {
@@ -385,27 +449,9 @@ const GoodsRegistrationPage: React.FC = () => {
 
       // const date = kstDate.toISOString().replace("Z", "+09:00");
       // console.log(date); // 예: 2025-04-25T20:45:00+09:00
-
-      // 1. 이미지 업로드 처리
-      let imageUrls: string[] = [];
-      if (formData.images.length > 0) {
-        try {
-          // 기존에 정의한 uploadImagesToServer 함수 사용
-          // 이미지와 함께 제품 정보도 전달
-          imageUrls = await uploadImagesToServer(formData.images, {
-            name: formData.title,
-            price: formData.price.toString(),
-            description: finalDescription
-          });
-          console.log("업로드된 이미지 URL:", imageUrls);
-        } catch (error) {
-          console.error("이미지 업로드 실패:", error);
-          alert("이미지 업로드에 실패했습니다. 다시 시도해주세요.");
-          setIsLoading(false);
-          return;
-        }
-      }
-
+      
+      
+      
       // 상품 등록 API 호출
       const submissionData = {
         ...formData,
@@ -414,7 +460,7 @@ const GoodsRegistrationPage: React.FC = () => {
         purchaseDate: purchaseDateString,
         createdAt: date.toString(),
         serialNumber: formData.serialNumber,
-        imageUrls: imageUrls, // 업로드된 이미지 URL 배열 추가
+        //imageUrls: imageUrls, // 업로드된 이미지 URL 배열 추가
       };
 
       console.log("submission: ", submissionData);
@@ -593,6 +639,26 @@ const GoodsRegistrationPage: React.FC = () => {
                 <p className="mt-2 text-sm text-gray-500">
                   * 판매글은 AI로 자동 생성되었습니다. 내용을 확인하고 등록해주세요.
                 </p>
+              </div>
+            </div>
+          )}
+
+          {isGenerated && (
+            <div className="mt-6">
+              <h4 className="text-sm font-semibold mb-2 text-gray-800">AI 분석된 이미지</h4>
+              <div className="grid grid-cols-3 gap-2">
+                {Object.entries(imageMap).map(([filename, blob], index) => (
+                  <div key={index} className="rounded overflow-hidden border">
+                    <img
+                      src={URL.createObjectURL(blob)}
+                      alt={filename}
+                      className="w-full h-24 object-cover"
+                    />
+                    <div className="text-xs text-center py-1 text-gray-600 truncate">
+                      {filename}
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           )}
