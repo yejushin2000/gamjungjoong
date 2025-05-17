@@ -1,4 +1,4 @@
-// src/api/axiosFastAPI.ts
+// src/api/fastapi.ts
 import axios from "axios";
 import { useAuthStore } from "../stores/useUserStore";
 

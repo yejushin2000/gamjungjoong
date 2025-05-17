@@ -47,62 +47,103 @@ async function parseMultipartBlob(blob: Blob): Promise<{
   jsonData: any;
   imageMap: { [key: string]: Blob };
 }> {
-  const text = await blob.text();
+  const arrayBuffer = await blob.arrayBuffer();
+  const text = new TextDecoder('utf-8').decode(arrayBuffer);
 
-  const boundaryMatch = text.match(/^--(.+?)\r\n/);
-  if (!boundaryMatch) throw new Error("boundary not found");
-  const boundary = boundaryMatch[1];
-
+  const boundary = "boundary";
   const parts = text.split(`--${boundary}`).filter(p => p.trim() && p.trim() !== "--");
 
   const imageMap: { [key: string]: Blob } = {};
   let jsonData: any = null;
 
   for (let part of parts) {
-    const headerBodySplit = part.split("\r\n\r\n");
-    if (headerBodySplit.length < 2) continue;
+    console.log("--- 파트 시작 ---");
+    console.log("파트 내용:", part);
+    const headerBodySeparator = part.indexOf('\r\n\r\n');
+    if (headerBodySeparator === -1) continue;
 
-    const header = headerBodySplit[0];
-    const body = headerBodySplit.slice(1).join("\r\n\r\n").trimEnd();
+    const header = part.substring(0, headerBodySeparator);
+    const body = part.substring(headerBodySeparator + 4);
+
+    console.log("파트 헤더:", header);
+    console.log("파트 바디:", body);
 
     const nameMatch = header.match(/name="(.+?)"/);
     const filenameMatch = header.match(/filename="(.+?)"/);
     const contentTypeMatch = header.match(/Content-Type: (.+)/);
 
     const name = nameMatch?.[1];
+    const filename = filenameMatch?.[1];
     const contentType = contentTypeMatch?.[1];
 
+    console.log("이름:", name);
+    console.log("파일명:", filename);
+    console.log("Content-Type:", contentType);
+
     if (contentType?.includes("application/json")) {
-      jsonData = JSON.parse(body);
-    } else if (filenameMatch) {
-      // 바이너리 Blob 생성
+      try {
+        jsonData = JSON.parse(body);
+        console.log("파싱된 JSON:", jsonData);
+      } catch (error) {
+        console.error("JSON 파싱 오류:", error, "본문:", body);
+        throw error;
+      }
+    } else if (filename) {
       const raw = new TextEncoder().encode(body);
-      const blob = new Blob([raw], { type: contentType || "application/octet-stream" });
-      imageMap[filenameMatch[1]] = blob; // 바이너리
+      const imageBlob = new Blob([raw], { type: contentType || "application/octet-stream" });
+      imageMap[filename] = imageBlob;
+      console.log("추가된 이미지 Blob:", filename, imageBlob);
     }
+    console.log("--- 파트 끝 ---");
   }
 
   return { jsonData, imageMap };
 }
 
-// 이미지를 서버에 업로드하고 이미지 URL 배열을 반환하는 함수
-export async function uploadProductAndImages(images: File[], productInfo: { name: any; price: any; description: any; }) {
+// 이미지를 서버에 업로드하고 이미지 URL 배열을 반환하는 함수 // description: any; 
+export async function uploadProductAndImages(images: File[], productInfo: { product_name: any; price: any; description: any; }) {
   const formData = new FormData();
-  images.forEach((img) => formData.append("images", img));
-  formData.append("product_name", productInfo.name);
-  formData.append("price", productInfo.price);
-  formData.append("description", productInfo.description);
+  // 이미지 추가 전 유효성 검증
+  if (!images || images.length === 0) {
+    throw new Error("이미지가 필요합니다");
+  }
 
-  const response = await fastapiInstance.post("/upload-info", formData, {
-    responseType: "blob", // binary로 받기
-    headers: { "Content-Type": "multipart/form-data" },
+  console.log("FormData에 추가되는 내용:");
+  images.forEach((img, index) => {
+    formData.append("images", img, `image_${index + 1}.${img.name.split('.').pop()}`);
+    console.log(`- images[${index}]:`, img.name, img.type, img.size);
   });
+  formData.append("product_name", String(productInfo.product_name || "상품"));
+  //console.log("- product_name:", String(productInfo.product_name || "상품"));
+  formData.append("price", String(productInfo.price || "0"));
+  //console.log("- price:", String(productInfo.price || "0"));
+  formData.append("description", String(productInfo.description || "설명"));
+  //console.log("- description:", String(productInfo.description || "설명"));
 
-  const { jsonData, imageMap } = await parseMultipartBlob(response.data);
-  console.log("json 데이터 : ", jsonData)
-  console.log("image 데이터 : ", imageMap)
-  return { jsonData, imageMap };
-}
+  try {
+    const response = await fastapiInstance.post("/upload-info", formData, {
+      responseType: "blob",
+      headers: {
+        "Content-Type": "multipart/form-data", // 명시적으로 설정
+        // Authorization 헤더도 없음 (token 없다 했으니까)
+      },
+    });
+    console.log("uploadProductAndImages에서 갓 받은 데이터", response.data)
+    const { jsonData, imageMap } = await parseMultipartBlob(response.data);
+    console.log("파싱된 JSON 데이터:", jsonData);
+    console.log("파싱된 이미지 맵:", imageMap);
+    return { jsonData, imageMap };
+
+  } catch (error: any) {
+    if (error.response?.data instanceof Blob) {
+      const text = await error.response.data.text();
+      console.error("📄 FastAPI 응답 오류 메시지:", JSON.parse(text));
+    } else {
+      console.error("❌ 알 수 없는 에러:", error);
+    }
+    throw error;  // 👈 에러를 던져서 호출부에서 try-catch로 잡게 하기
+  }
+} 
 
 // 프론트엔드에 추가할 함수 - 기존 uploadProductAndImages 함수 아래에 추가
 const generateSalesContent = async (
@@ -298,11 +339,22 @@ const GoodsRegistrationPage: React.FC = () => {
   // 이미지 캡처 콜백
   function dataURLtoFile(dataurl: string, filename: string): File {
     const arr = dataurl.split(',');
-    const mime = arr[0].match(/:(.*?);/)![1];
+    const mimeMatch = arr[0].match(/:(.*?);/);
+    let mime = mimeMatch ? mimeMatch[1] : ''; // 매치 결과가 있으면 추출, 없으면 빈 문자열
+
+    // 파일 확장자에 따라 MIME 타입 명시적으로 설정 (더 정확)
+    if (filename.toLowerCase().endsWith('.jpg') || filename.toLowerCase().endsWith('.jpeg')) {
+      mime = 'image/jpeg';
+    } else if (filename.toLowerCase().endsWith('.png')) {
+      mime = 'image/png';
+    } else if (!mime) {
+      mime = 'application/octet-stream'; // 기본 MIME 타입
+    }
+
     const bstr = atob(arr[1]);
     let n = bstr.length;
     const u8arr = new Uint8Array(n);
-    while(n--) {
+    while (n--) {
       u8arr[n] = bstr.charCodeAt(n);
     }
     return new File([u8arr], filename, { type: mime });
@@ -347,11 +399,18 @@ const GoodsRegistrationPage: React.FC = () => {
       let processedImageMap = {};
       if (formData.images.length > 0) {
         try {
+          console.log("업로드 시작, 이미지 수:", formData.images.length);
+          console.log("업로드할 데이터:", {
+            name: formData.title,
+            price: formData.price,
+            description: formData.description || ""
+          });
+
           // 기존에 정의한 uploadProductAndImages 함수 사용
           const { jsonData, imageMap } = await uploadProductAndImages(formData.images, {
-            name: formData.title,
+            product_name: formData.title,
             price: formData.price.toString(),
-            description: formData.description || "",
+            description: formData.description || "", // description 필드 추가
           });
           console.log("이미지 업로드 및 객체 탐지 결과:", jsonData);
           

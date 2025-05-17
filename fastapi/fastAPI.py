@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 
 # 환경변수 로드
 load_dotenv()
+fastapi_url = os.getenv("REACT_APP_FASTAPI_URL")
 
 # API 설정
 GMS_API_KEY = os.getenv("GMS_API_KEY")
@@ -30,7 +31,7 @@ GMS_ENDPOINT = "https://gms.p.ssafy.io/gmsapi/api.openai.com/v1/chat/completions
 headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GMS_API_KEY}"}
 
 # FastAPI 인스턴스 생성
-app = FastAPI(title="Product Image Processing API")
+app = FastAPI(title="Product Image Processing API") 
 
 # CORS 설정 (모든 origin 허용 – 배포 시에는 필요한 origin만 허용해야 함)
 app.add_middleware(
@@ -84,44 +85,26 @@ def calculate_iou(box1, box2):
     return intersection_area / union_area
 
 # 멀티파트 형식으로 응답을 보내는 함수
-def create_multipart_response(json_data, image_files):
+def create_multipart_response(json_data, image_data_list):
     boundary = "boundary"
-    
-    # 멀티파트 응답 생성
-    def generate():
-        # JSON 데이터 부분
-        yield f"--{boundary}\r\n"
-        yield f"Content-Disposition: form-data; name=\"json_data\"\r\n"
-        yield f"Content-Type: application/json\r\n\r\n"
-        yield json.dumps(json_data)
-        yield f"\r\n"
-        
-        # 각 이미지 파일들 추가
-        for img_name, img_path in image_files:
-            try:
-                # 이미지 파일 읽기
-                with open(img_path, "rb") as f:
-                    img_data = f.read()
-                
-                # 파일의 MIME 타입 확인
-                mime_type, _ = mimetypes.guess_type(img_path)
-                if not mime_type:
-                    mime_type = "application/octet-stream"
-                
-                # 멀티파트 형식으로 이미지 데이터 추가
-                yield f"--{boundary}\r\n"
-                yield f"Content-Disposition: form-data; name=\"{img_name}\"; filename=\"{os.path.basename(img_path)}\"\r\n"
-                yield f"Content-Type: {mime_type}\r\n\r\n"
-                yield img_data
-                yield f"\r\n"
-            except Exception as e:
-                print(f"Error reading image file {img_path}: {e}")
-        
-        # 멀티파트 종료
+    async def generate():
+        # JSON 데이터 부분 (기존과 동일)
+        yield (f"--{boundary}\r\n"
+               f"Content-Disposition: form-data; name=\"json_data\"\r\n"
+               f"Content-Type: application/json\r\n\r\n"
+               f"{json.dumps(json_data)}\r\n")
+
+        # 이미지 데이터 부분 (경로 대신 메모리 데이터 사용)
+        for img_name, img_bytes in image_data_list:
+            mime_type = "image/jpeg"  # 또는 실제 MIME 타입에 따라 설정
+            yield (f"--{boundary}\r\n"
+                   f"Content-Disposition: form-data; name=\"{img_name}\"; filename=\"{img_name.split('_')[-1]}.jpg\"\r\n"
+                   f"Content-Type: {mime_type}\r\n\r\n")
+            yield img_bytes
+            yield b'\r\n'
+
         yield f"--{boundary}--\r\n"
-    
-    print("전송 완료!")
-    # StreamingResponse로 반환
+
     return StreamingResponse(
         generate(),
         media_type=f"multipart/form-data; boundary={boundary}"
@@ -568,81 +551,50 @@ async def generate_sales_content(
 def read_root():
     return {"message": "Product Image Processing API"}
 
-# 이미지 업로드 및 처리 엔드포인트
 @app.post("/upload-info")
 async def upload_info_multipart(
     images: List[UploadFile] = File(...),
     product_name: str = Form(...),
     price: str = Form(...),
-    description: str = Form(...)
+    description: str = Form(...),
 ):
+    print("upload-info 호출됨")
     try:
-        image_urls = []
         classification_results = []
-        detection_image_urls = []
-        image_files = []  # 응답에 포함될 이미지 파일 목록
-        
+        image_data_list = [] # (name, bytes) 튜플 리스트
+        print("이미지 정보들 : ", images)
+        print("상품명 : ", product_name)
         for image in images:
-            # 고유 파일명 생성
             file_extension = os.path.splitext(image.filename)[1]
             unique_filename = f"{uuid.uuid4()}{file_extension}"
-            
-            # 이미지 내용 읽기
             content = await image.read()
-            image_array = np.frombuffer(content, np.uint8)
-            img = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
 
-            if img is None:
-                print(f"Failed to load image: {image.filename}")
-                continue
-                
-            # 원본 이미지 저장 
-            original_filename = f"{unique_filename}" 
-            original_filepath = os.path.join(UPLOAD_DIR, original_filename)
-            cv2.imwrite(original_filepath, img)
-            image_url = f"/uploads/{original_filename}"
-            image_urls.append(image_url)
-            
-            # 멀티파트 응답을 위해 파일 목록에 추가
-            image_files.append((f"original_{original_filename}", original_filepath))
-            
-            # 이미지 분류
-            classification_result = model_manager.classify_image(img)
-            classification_results.append({
-                "filename": unique_filename,
-                "classification": classification_result
-            })
-            
-            # 객체 탐지
-            detections = model_manager.detect_objects(img)
-            if detections:
-                detection_img = model_manager.draw_detections(img, detections)
-                detection_filename = f"detection_{unique_filename}"
-                detection_filepath = os.path.join(PROCESSED_DIR, detection_filename)
-                cv2.imwrite(detection_filepath, detection_img)
-                detection_url = f"/processed/{detection_filename}"
-                detection_image_urls.append({
+            img = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_COLOR)
+            if img is not None:
+                classification_result = model_manager.classify_image(img)
+                classification_results.append({
                     "filename": unique_filename,
-                    "detections": detections
+                    "classification": classification_result
                 })
-                
-                # 멀티파트 응답을 위해 파일 목록에 추가
-                image_files.append((f"detection_{detection_filename}", detection_filepath))
-            else:
-                print("멀쩡한 노트북이거나, 노트북이 없거나")
-        
-        # JSON 데이터 준비
+
+                detections = model_manager.detect_objects(img)
+                image_data_list.append((f"original_{unique_filename}", content)) # 원본 이미지 바이트 데이터
+
+                if detections:
+                    detection_img = model_manager.draw_detections(img, detections)
+                    _, detection_img_bytes = cv2.imencode(".jpg", detection_img) # 메모리 버퍼로 변환
+                    detection_filename = f"detection_{unique_filename}"
+                    image_data_list.append((f"detection_{detection_filename}", detection_img_bytes.tobytes()))
+
         json_data = {
             "product_name": product_name,
             "price": price,
-            "description": description,
             "classification_results": classification_results,
-            "detection_results": detection_image_urls
+            "detection_results": [{"filename": name.split('_')[-1], "detections": []} for name, _ in image_data_list if "detection" in name] # 간략화
         }
-        print("탐지된 이미지 파일들: ", image_files)
-        # 멀티파트 응답 생성 및 반환
-        return create_multipart_response(json_data, image_files)
-    
+
+        return create_multipart_response(json_data, image_data_list)
+
     except Exception as e:
         print(f"Error processing upload: {e}")
         raise HTTPException(status_code=500, detail=str(e))
