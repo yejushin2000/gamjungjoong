@@ -2,7 +2,7 @@ import mimetypes
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import os
 import shutil
 import uvicorn
@@ -323,6 +323,17 @@ class ModelManager:
 # 모델 매니저 인스턴스 생성
 model_manager = ModelManager()
 
+# 새로운 요청 바디 모델 정의
+class GenerateDescriptionRequest(BaseModel):
+    classification_results: Optional[List[Dict[str, Any]]] = []
+    detection_results: Optional[List[Dict[str, Any]]] = []
+    image_filenames: Optional[List[str]] = []
+    product_name: str
+    price: str
+    purchase_date: Optional[str] = ""
+    serial_number: Optional[str] = ""
+    configuration: Optional[int] = 1
+
 # 손상 상태를 프롬프트 형식으로 변환하는 함수
 def format_scratch_data(detection_image_urls):
     """
@@ -561,39 +572,38 @@ async def upload_info_multipart(
     print("upload-info 호출됨")
     try:
         classification_results = []
-        image_data_list = [] # (name, bytes) 튜플 리스트
+        detection_results_all = [] # 모든 이미지의 탐지 결과를 담을 리스트
         print("이미지 정보들 : ", images)
         print("상품명 : ", product_name)
         for image in images:
+            original_filename = image.filename
             file_extension = os.path.splitext(image.filename)[1]
             unique_filename = f"{uuid.uuid4()}{file_extension}"
             content = await image.read()
-
             img = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_COLOR)
             if img is not None:
                 classification_result = model_manager.classify_image(img)
                 classification_results.append({
+                    "original_filename": original_filename, # 원본 파일 이름 추가
                     "filename": unique_filename,
                     "classification": classification_result
                 })
 
                 detections = model_manager.detect_objects(img)
-                image_data_list.append((f"original_{unique_filename}", content)) # 원본 이미지 바이트 데이터
-
-                if detections:
-                    detection_img = model_manager.draw_detections(img, detections)
-                    _, detection_img_bytes = cv2.imencode(".jpg", detection_img) # 메모리 버퍼로 변환
-                    detection_filename = f"detection_{unique_filename}"
-                    image_data_list.append((f"detection_{detection_filename}", detection_img_bytes.tobytes()))
+                detection_results_all.append({
+                    "original_filename": original_filename, # 원본 파일 이름 추가
+                    "filename": unique_filename,
+                    "detections": detections
+                })
 
         json_data = {
             "product_name": product_name,
             "price": price,
             "classification_results": classification_results,
-            "detection_results": [{"filename": name.split('_')[-1], "detections": []} for name, _ in image_data_list if "detection" in name] # 간략화
+            "detection_results": detection_results_all,
         }
 
-        return create_multipart_response(json_data, image_data_list)
+        return JSONResponse(content=json_data)
 
     except Exception as e:
         print(f"Error processing upload: {e}")
@@ -601,59 +611,33 @@ async def upload_info_multipart(
 
 # 판매글 생성 엔드포인트
 @app.post("/generate-description")
-async def generate_description(
-    images: List[UploadFile] = File(...),
-    product_name: str = Form(...),
-    price: str = Form(...),
-    purchase_date: str = Form(""),
-    serial_number: str = Form(""),
-    configuration: int = Form(1)
-):
+async def generate_description(request_data: GenerateDescriptionRequest):
     try:
-        image_urls = []
-        classification_results = []
+        product_name = request_data.product_name
+        price = request_data.price
+        purchase_date = request_data.purchase_date
+        serial_number = request_data.serial_number
+        configuration = request_data.configuration
+        classification_results = request_data.classification_results or []
+        detection_results_all = request_data.detection_results or []
+        image_filenames = request_data.image_filenames or []
+
+        print("✅ /generate-description 호출됨")
+        print("➡️ 받은 classification 결과:", classification_results)
+        print("➡️ 받은 detection 결과:", detection_results_all)
+        print("➡️ 받은 이미지 파일명:", image_filenames)
+
+        # detection_results_all을 detection_image_urls 형식으로 변환
         detection_image_urls = []
-        
-        for image in images:
-            # 고유 파일명 생성
-            file_extension = os.path.splitext(image.filename)[1]
-            unique_filename = f"{uuid.uuid4()}{file_extension}"
-            filepath = os.path.join(UPLOAD_DIR, unique_filename)
-            
-            # 파일 저장
-            with open(filepath, "wb") as buffer:
-                shutil.copyfileobj(image.file, buffer)
-            
-            image_url = f"/uploads/{unique_filename}"
-            image_urls.append(image_url)
-            
-            img = cv2.imread(filepath)
-            if img is None:
-                print(f"Failed to load image: {filepath}")
-                continue
-            
-            # 이미지 분류
-            classification_result = model_manager.classify_image(img)
-            classification_results.append({
-                "image_url": image_url,
-                "classification": classification_result
+        for i, detection_result in enumerate(detection_results_all):
+            original_filename = detection_result.get("original_filename") or (image_filenames[i] if i < len(image_filenames) else "unknown")
+            detection_image_urls.append({
+                "original_url": original_filename, # URL 대신 파일명 사용
+                "detection_url": None, # 더 이상 detection 이미지를 생성하지 않음
+                "detections": detection_result.get("detections", [])
             })
-            
-            # 객체 탐지
-            detections = model_manager.detect_objects(img)
-            if detections:
-                detection_img = model_manager.draw_detections(img.copy(), detections)
-                detection_filename = f"detection_{unique_filename}"
-                detection_filepath = os.path.join(PROCESSED_DIR, detection_filename)
-                cv2.imwrite(detection_filepath, detection_img)
-                detection_url = f"/processed/{detection_filename}"
-                detection_image_urls.append({
-                    "original_url": image_url,
-                    "detection_url": detection_url,
-                    "detections": detections
-                })
-        
-        # 스펙 정보 구성 (간단한 예시)
+
+        # 스펙 정보 구성 (기존 로직 활용)
         specs_text = f"""
         • 브랜드: 알 수 없음
         • 모델: {product_name}
@@ -666,42 +650,39 @@ async def generate_description(
         • 무게: 알 수 없음
         • OS: 알 수 없음
         """
-        
-        # 시리얼 넘버로 정보 검색 시도
+
+        # 시리얼 넘버로 정보 검색 시도 (기존 로직 활용)
         try:
-            # CSV 파일 로드 시도
             try:
                 df = pd.read_csv('Laptop.csv')
             except:
                 df = pd.read_csv('Laptop.csv', encoding='cp949')
-            
-            # 시리얼 넘버로 검색
+
             laptop = None
             if '시리얼넘버' in df.columns:
                 matches = df[df['시리얼넘버'] == serial_number]
                 if not matches.empty:
                     laptop = matches.iloc[0]
-            
-            # 스펙 정보 구성
+
             if laptop is not None:
                 specs_text = f"""
-                • 브랜드: {laptop.get('브랜드', '정보없음')}
-                • 모델: {laptop.get('제품군', {product_name})}
-                • 화면: {laptop.get('화면 크기', '정보없음')} ({laptop.get('해상도', '정보없음')})
-                • CPU: {laptop.get('CPU 브랜드', '정보없음')} {laptop.get('CPU 모델', '정보없음')}
-                • 그래픽: {laptop.get('GPU 타입', '정보없음')} {laptop.get('GPU 카드', '정보없음')}
-                • 메모리: {laptop.get('RAM', '정보없음')}
-                • 저장 공간: {laptop.get('저장 용량', '정보없음')}
-                • 배터리: {laptop.get('배터리', '정보없음')}
-                • 무게: {laptop.get('무게', '정보없음')}
-                • OS: {laptop.get('os', '정보없음')}
+        • 브랜드: {laptop.get('브랜드', '정보없음')}
+        • 모델: {laptop.get('제품군', product_name)}
+        • 화면: {laptop.get('화면 크기', '정보없음')} ({laptop.get('해상도', '정보없음')})
+        • CPU: {laptop.get('CPU 브랜드', '정보없음')} {laptop.get('CPU 모델', '정보없음')}
+        • 그래픽: {laptop.get('GPU 타입', '정보없음')} {laptop.get('GPU 카드', '정보없음')}
+        • 메모리: {laptop.get('RAM', '정보없음')}
+        • 저장 공간: {laptop.get('저장 용량', '정보없음')}
+        • 배터리: {laptop.get('배터리', '정보없음')}
+        • 무게: {laptop.get('무게', '정보없음')}
+        • OS: {laptop.get('os', '정보없음')}
                 """
         except Exception as e:
             print(f"CSV 검색 실패: {e}")
-        
-        # 흠집 데이터 형식 변환
+
+        # 흠집 데이터 형식 변환 (기존 로직 활용)
         scratch_data = format_scratch_data(detection_image_urls)
-        
+
         # 판매글 생성
         sales_content = await generate_sales_content(
             product_name,
@@ -713,12 +694,12 @@ async def generate_description(
             specs_text,
             scratch_data
         )
-        
+
         # 결과 반환
         return JSONResponse(content={
             "product_name": product_name,
             "price": price,
-            "image_urls": image_urls,
+            "image_urls": image_filenames, # 프론트엔드에서 받은 파일명 그대로 반환
             "detection_results": detection_image_urls,
             "sales_content": sales_content,
             "title": sales_content["title"],
@@ -726,7 +707,7 @@ async def generate_description(
             "specs_text": specs_text,
             "scratch_data": scratch_data
         })
-    
+
     except Exception as e:
         print(f"게시글 생성 오류: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

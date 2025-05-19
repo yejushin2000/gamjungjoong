@@ -1,5 +1,5 @@
 // src/pages/goodsPage/goodsRegistrationPage.tsx
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import NavigationBar from "../../components/common/NavigationBar";
 import Header from "../../components/common/Header";
@@ -18,12 +18,37 @@ import fastapiInstance from "../../api/fastapi"; // 기존 axios 인스턴스 �
 type PackageType = "full" | "single" | "partial";
 
 interface ExtendedGoodsData extends ItemRegistParams {
-  // images: File[];
   purchaseYear: string;
   purchaseMonth: string;
   // purchaseDate: string;
   images: File[]; // 
   imageUrls?: string[]; // 서버에서 반환받은 이미지 URL 배열
+}
+
+interface Detection {
+ class: string;
+ confidence: number;
+ bbox: [number, number, number, number];
+}
+
+interface DetectionResult {
+  original_filename?: string; // 추가
+  filename: string;
+  detections: Detection[];
+}
+
+interface ClassificationResult {
+  original_filename?: string; // 추가
+  filename: string;
+  classification: { class: string; confidence: number };
+}
+
+interface UploadInfoResponse {
+ product_name: string;
+ price: string;
+ classification_results: ClassificationResult[];
+ detection_results: DetectionResult[];
+ image_filenames?: string[]; // 👈 이 부분을 추가
 }
 
 // fastapi로 이미지 전송, 결과 받아오는 코드
@@ -101,7 +126,7 @@ async function parseMultipartBlob(blob: Blob): Promise<{
 }
 
 // 이미지를 서버에 업로드하고 이미지 URL 배열을 반환하는 함수 // description: any; 
-export async function uploadProductAndImages(images: File[], productInfo: { product_name: any; price: any; description: any; }) {
+export async function uploadProductAndImages(images: File[], productInfo: { product_name: any; price: any; description: any; }, setUploadInfoResponse: React.Dispatch<React.SetStateAction<UploadInfoResponse | null>>) {
   const formData = new FormData();
   // 이미지 추가 전 유효성 검증
   if (!images || images.length === 0) {
@@ -110,7 +135,7 @@ export async function uploadProductAndImages(images: File[], productInfo: { prod
 
   console.log("FormData에 추가되는 내용:");
   images.forEach((img, index) => {
-    formData.append("images", img, `image_${index + 1}.${img.name.split('.').pop()}`);
+    formData.append("images", img, img.name); // 파일 이름 그대로 사용
     console.log(`- images[${index}]:`, img.name, img.type, img.size);
   });
   formData.append("product_name", String(productInfo.product_name || "상품"));
@@ -122,32 +147,33 @@ export async function uploadProductAndImages(images: File[], productInfo: { prod
 
   try {
     const response = await fastapiInstance.post("/upload-info", formData, {
-      responseType: "blob",
       headers: {
-        "Content-Type": "multipart/form-data", // 명시적으로 설정
-        // Authorization 헤더도 없음 (token 없다 했으니까)
+        "Content-Type": "multipart/form-data",
       },
     });
-    console.log("uploadProductAndImages에서 갓 받은 데이터", response.data)
-    const { jsonData, imageMap } = await parseMultipartBlob(response.data);
-    console.log("파싱된 JSON 데이터:", jsonData);
-    console.log("파싱된 이미지 맵:", imageMap);
-    return { jsonData, imageMap };
+
+    if (response.status < 200 || response.status >= 300) {
+      const errorData = response.data; // Axios는 이미 JSON 파싱을 시도했을 수 있습니다.
+      console.error("FastAPI 응답 오류:", errorData);
+      throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+    }
+
+    const data: UploadInfoResponse = response.data; // response.data를 그대로 사용
+    console.log("FastAPI 응답 (JSON):", data);
+    setUploadInfoResponse(data);
+    return data;
 
   } catch (error: any) {
-    if (error.response?.data instanceof Blob) {
-      const text = await error.response.data.text();
-      console.error("📄 FastAPI 응답 오류 메시지:", JSON.parse(text));
-    } else {
-      console.error("❌ 알 수 없는 에러:", error);
-    }
-    throw error;  // 👈 에러를 던져서 호출부에서 try-catch로 잡게 하기
+    console.error("이미지 업로드 실패:", error);
+    throw error;
   }
 } 
 
 // 프론트엔드에 추가할 함수 - 기존 uploadProductAndImages 함수 아래에 추가
 const generateSalesContent = async (
-  images: File[],
+  classificationResults: ClassificationResult[] | null,
+  detectionResults: DetectionResult[] | null, // Nullable 타입으로 변경
+  imageFilenames: string[], // 이미지 파일명 리스트 추가
   productInfo: { 
     name: string; 
     price: string; 
@@ -156,29 +182,32 @@ const generateSalesContent = async (
     configuration: number;
   }
 ): Promise<{ title: string; description: string; imageUrls: string[] }> => {
-  if (images.length === 0) {
-    throw new Error("이미지를 최소 1장 이상 촬영해주세요.");
+  if (!classificationResults || classificationResults.length === 0 || imageFilenames.length === 0) {
+    throw new Error("분석 결과 또는 이미지 정보가 없습니다. 먼저 사진을 촬영하고 분석을 진행해주세요.");
   }
 
   try {
-    const formData = new FormData();
+    const requestData = {
+      classification_results: classificationResults.map((result, index) => ({
+        ...result,
+        original_filename: imageFilenames[index]
+      })),
+      detection_results: detectionResults ? detectionResults.map((result, index) => ({ // detectionResults가 있을 때만 매핑
+        ...result,
+        original_filename: imageFilenames[index]
+      })) : [], // null이면 빈 배열 처리
+      image_filenames: imageFilenames,
+      product_name: productInfo.name,
+      price: productInfo.price,
+      serial_number: productInfo.serialNumber,
+      purchase_date: productInfo.purchaseDate,
+      configuration: productInfo.configuration.toString(),
+    };
 
-    // 이미지 추가
-    images.forEach((file, index) => {
-      formData.append('images', file);
-    });
-
-    // 제품 정보 추가
-    formData.append('product_name', productInfo.name);
-    formData.append('price', productInfo.price);
-    formData.append('serial_number', productInfo.serialNumber);
-    formData.append('purchase_date', productInfo.purchaseDate);
-    formData.append('configuration', productInfo.configuration.toString());
-
-    // 판매글 생성 API 호출
-    const response = await fastapiInstance.post('/generate-description', formData, {
+    // 판매글 생성 API 호출 (요청 바디 구조 변경)
+    const response = await fastapiInstance.post('/generate-description', requestData, {
       headers: {
-        'Content-Type': 'multipart/form-data',
+        'Content-Type': 'application/json', // 요청 Content-Type을 JSON으로 변경
       },
     });
 
@@ -275,6 +304,12 @@ const GoodsRegistrationPage: React.FC = () => {
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [isGenerated, setIsGenerated] = useState<boolean>(false);
 
+  const [uploadInfoResponse, setUploadInfoResponse] = useState<UploadInfoResponse | null>(null);
+  const imageRefs = useRef<(HTMLImageElement | null)[]>([]);
+  const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
+  // capturedImages 타입을 string[] 에서 { url: string; file: File }[] 로 변경
+  const [capturedImages, setCapturedImages] = useState<{ url: string; file: File }[]>([]);
+
   // 입력 필드 변경 처리
   const handleInputChange = (
     e: React.ChangeEvent<
@@ -333,7 +368,7 @@ const GoodsRegistrationPage: React.FC = () => {
   //   }
   // };
   const [isCameraOpen, setIsCameraOpen] = useState(false);
-  const [capturedImages, setCapturedImages] = useState<string[]>([]);
+  
   // 받아오는 이미지(객체탐지 결과)를 저장하는 const
   const [imageMap, setImageMap] = useState<Record<string, Blob>>({});
   // 이미지 캡처 콜백
@@ -360,13 +395,14 @@ const GoodsRegistrationPage: React.FC = () => {
     return new File([u8arr], filename, { type: mime });
   }
   const handleImageCapture = (imageDataUrl: string) => {
-    const file = dataURLtoFile(imageDataUrl, `capture-${Date.now()}.jpg`);
+  const filename = `capture-${Date.now()}.jpg`;
+  const file = dataURLtoFile(imageDataUrl, filename);
 
-    setCapturedImages(prev => [...prev, imageDataUrl]); // 화면용 URL
-    setFormData(prev => ({
-      ...prev,
-      images: [...prev.images, file], // File 객체로 추가
-    }));
+  setCapturedImages(prev => [...prev, { url: imageDataUrl, file }]); // URL과 File 객체 모두 저장
+  setFormData(prev => ({
+    ...prev,
+    images: [...prev.images, file], // File 객체는 formData.images 에도 추가
+  }));
   };
 
   // 판매글 생성 처리 - handleSubmit 함수 위에 추가
@@ -394,29 +430,21 @@ const GoodsRegistrationPage: React.FC = () => {
           ? formData.purchaseYear
           : `${formData.purchaseYear}-${formData.purchaseMonth.padStart(2, "0")}`;
 
-      
+      let uploadResult: UploadInfoResponse | null = null;
       // 1. 먼저 이미지를 업로드하고 객체 탐지 결과 받아오기
-      let processedImageMap = {};
       if (formData.images.length > 0) {
         try {
-          console.log("업로드 시작, 이미지 수:", formData.images.length);
-          console.log("업로드할 데이터:", {
-            name: formData.title,
-            price: formData.price,
-            description: formData.description || ""
-          });
-
-          // 기존에 정의한 uploadProductAndImages 함수 사용
-          const { jsonData, imageMap } = await uploadProductAndImages(formData.images, {
-            product_name: formData.title,
-            price: formData.price.toString(),
-            description: formData.description || "", // description 필드 추가
-          });
-          console.log("이미지 업로드 및 객체 탐지 결과:", jsonData);
-          
-          // 객체 탐지된 이미지를 상태에 저장
-          setImageMap(imageMap);
-          processedImageMap = imageMap;
+          console.log("이미지 업로드 시작, 이미지 수:", formData.images.length);
+          uploadResult = await uploadProductAndImages(
+            formData.images,
+            {
+              product_name: formData.title,
+              price: formData.price.toString(),
+              description: formData.description || "",
+            },
+            setUploadInfoResponse // 콜백 함수 전달
+          );
+          console.log("이미지 업로드 및 객체 탐지 완료:", uploadResult);
         } catch (error) {
           console.error("이미지 업로드 실패:", error);
           alert("이미지 업로드에 실패했습니다. 다시 시도해주세요.");
@@ -425,28 +453,35 @@ const GoodsRegistrationPage: React.FC = () => {
         }
       }
 
-      // 2. 판매글 생성 API 호출
-      const { title, description, imageUrls } = await generateSalesContent(
-        formData.images,
-        {
-          name: formData.title,
-          price: formData.price.toString(),
-          serialNumber: formData.serialNumber,
-          purchaseDate: purchaseDateString,
-          configuration: formData.configuration
-        }
-      );
+      // 2. 판매글 생성 API 호출 (변경된 파라미터 전달)
+      if (uploadResult?.classification_results && uploadResult?.classification_results.length === formData.images.length) {
+        const imageFilenames = uploadResult.classification_results.map(res => res.original_filename || res.filename);
+        const { title, description, imageUrls } = await generateSalesContent(
+          uploadResult.classification_results,
+          uploadResult.detection_results, // detectionResults는 그대로 전달 (null일 수도 있음)
+          imageFilenames,
+          {
+            name: formData.title,
+            price: formData.price.toString(),
+            serialNumber: formData.serialNumber,
+            purchaseDate: purchaseDateString,
+            configuration: formData.configuration
+          }
+        );
 
-      // 생성된 판매글 설정
-      setFormData((prev) => ({
-        ...prev,
-        title: title, // 제목도 AI가 생성한 것으로 업데이트
-        description: description,
-        imageUrls: imageUrls
-      }));
-      
-      setIsGenerated(true);
-      alert("판매글이 생성되었습니다. 내용을 확인하고 등록해주세요.");
+        // 생성된 판매글 설정 (기존 로직 유지)
+        setFormData((prev) => ({
+          ...prev,
+          title: title, // 제목도 AI가 생성한 것으로 업데이트
+          description: description,
+          imageUrls: imageUrls
+        }));
+
+        setIsGenerated(true);
+        alert("판매글이 생성되었습니다. 내용을 확인하고 등록해주세요.");
+      } else {
+        alert("이미지 분석 결과를 받지 못했거나 이미지 개수가 맞지 않습니다. 다시 시도해주세요.");
+      }
       
     } catch (error) {
       console.error("판매글 생성 오류:", error);
@@ -637,10 +672,10 @@ const GoodsRegistrationPage: React.FC = () => {
           </div>
           {capturedImages.length > 0 && (
             <div className="grid grid-cols-3 gap-2 mt-2">
-              {capturedImages.map((img, index) => (
+              {capturedImages.map((imgitem, index) => (
                 <img
                   key={index}
-                  src={img}
+                  src={imgitem.url} // item 객체의 url 속성 사용
                   alt={`captured-${index}`}
                   className="h-24 rounded"
                 />
@@ -702,22 +737,91 @@ const GoodsRegistrationPage: React.FC = () => {
             </div>
           )}
 
-          {isGenerated && (
+          {isGenerated && uploadInfoResponse && uploadInfoResponse.detection_results.length > 0 && (
             <div className="mt-6">
-              <h4 className="text-sm font-semibold mb-2 text-gray-800">AI 분석된 이미지</h4>
+              <h4 className="text-sm font-semibold mb-2 text-gray-800">AI 분석 결과</h4>
               <div className="grid grid-cols-3 gap-2">
-                {Object.entries(imageMap).map(([filename, blob], index) => (
-                  <div key={index} className="rounded overflow-hidden border">
-                    <img
-                      src={URL.createObjectURL(blob)}
-                      alt={filename}
-                      className="w-full h-24 object-cover"
-                    />
-                    <div className="text-xs text-center py-1 text-gray-600 truncate">
-                      {filename}
+                {capturedImages.map((capturedImage, index) => {
+                  const detectionResult = uploadInfoResponse.detection_results.find(
+                    (res) => res.original_filename === capturedImage.file.name // 원본 파일 이름으로 비교
+                  );
+
+                  return (
+                    <div key={index} style={{ position: 'relative', display: 'inline-block', overflow: 'hidden' }}>
+                      <img
+                        ref={(el) => (imageRefs.current[index] = el)}
+                        src={capturedImage.url}
+                        alt={`analyzed-${index}`}
+                        style={{ maxWidth: '100%', display: 'block' }}
+                        onLoad={() => {
+                          const img = imageRefs.current[index];
+                          const canvas = canvasRefs.current[index];
+                          const ctx = canvas?.getContext('2d');
+
+                          if (img && canvas && ctx && detectionResult) {
+                            console.log("Image Natural Width:", img.naturalWidth, "Image Natural Height:", img.naturalHeight);
+                            canvas.width = img.naturalWidth;
+                            canvas.height = img.naturalHeight;
+                            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                            detectionResult.detections.forEach((detection) => {
+                              const [x_min, y_min, x_max, y_max] = detection.bbox;
+                              const width = x_max - x_min;
+                              const height = y_max - y_min;
+                              const className = detection.class;
+                              let classNameKor = className; // 기본적으로 영문 유지
+                              const confidence = detection.confidence.toFixed(2);
+
+                              let strokeColor = 'red'; // 기본 색상
+                              let fillColor = 'red';   // 기본 채우기 색상
+
+                              switch (className) {
+                                case 'Damaged Keys':
+                                  strokeColor = 'blue';
+                                  fillColor = 'blue';
+                                  classNameKor = '키보드 손상';
+                                  break;
+                                case 'Damaged Screen':
+                                  strokeColor = 'green';
+                                  fillColor = 'green';
+                                  classNameKor = '액정깨짐';
+                                  break;
+                                case 'Display Issues':
+                                  strokeColor = 'orange';
+                                  fillColor = 'orange';
+                                  classNameKor = '화면 이상';
+                                  break;
+                                case 'Scratch':
+                                  strokeColor = 'purple';
+                                  fillColor = 'purple';
+                                  classNameKor = '스크래치';
+                                  break;
+                                case 'normal':
+                                  strokeColor = 'red'; // 투명
+                                  fillColor = 'red';   // 투명
+                                  break;
+                                default:
+                                  break; // 기본 색상 유지
+                              }
+
+                              ctx.strokeStyle = strokeColor;
+                              ctx.lineWidth = 2;
+                              ctx.strokeRect(x_min, y_min, width, height);
+
+                              ctx.fillStyle = fillColor;
+                              ctx.font = '12px Arial';
+                              ctx.fillText(`${classNameKor} `, x_min, y_min - 5);
+                            });
+                          }
+                        }}
+                      />
+                      <canvas
+                        ref={(el) => (canvasRefs.current[index] = el)}
+                        style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none' }}
+                      />
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
