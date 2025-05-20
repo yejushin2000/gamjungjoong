@@ -18,10 +18,10 @@ import fastapiInstance from "../../api/fastapi"; // 기존 axios 인스턴스 �
 type PackageType = "full" | "single" | "partial";
 
 interface ExtendedGoodsData extends ItemRegistParams {
+  // images: File[];
   purchaseYear: string;
   purchaseMonth: string;
   // purchaseDate: string;
-  images: File[]; // 
   imageUrls?: string[]; // 서버에서 반환받은 이미지 URL 배열
 }
 
@@ -53,79 +53,8 @@ interface UploadInfoResponse {
 
 // fastapi로 이미지 전송, 결과 받아오는 코드
 
-// base64 문자열을 Blob 형식으로 변환하는 헬퍼 함수
-const dataURLtoBlob = (dataURL: string): Blob => {
-  const arr = dataURL.split(',');
-  const mime = arr[0].match(/:(.*?);/)?.[1] || 'image/jpeg';
-  const bstr = atob(arr[1]);
-  let n = bstr.length;
-  const u8arr = new Uint8Array(n);
-  
-  while (n--) {
-    u8arr[n] = bstr.charCodeAt(n);
-  }
-  return new Blob([u8arr], { type: mime });
-};
 
-// fastapi 서버에서 멀티파트로 받은 데이터를 분리하는 함수
-async function parseMultipartBlob(blob: Blob): Promise<{
-  jsonData: any;
-  imageMap: { [key: string]: Blob };
-}> {
-  const arrayBuffer = await blob.arrayBuffer();
-  const text = new TextDecoder('utf-8').decode(arrayBuffer);
-
-  const boundary = "boundary";
-  const parts = text.split(`--${boundary}`).filter(p => p.trim() && p.trim() !== "--");
-
-  const imageMap: { [key: string]: Blob } = {};
-  let jsonData: any = null;
-
-  for (let part of parts) {
-    console.log("--- 파트 시작 ---");
-    console.log("파트 내용:", part);
-    const headerBodySeparator = part.indexOf('\r\n\r\n');
-    if (headerBodySeparator === -1) continue;
-
-    const header = part.substring(0, headerBodySeparator);
-    const body = part.substring(headerBodySeparator + 4);
-
-    console.log("파트 헤더:", header);
-    console.log("파트 바디:", body);
-
-    const nameMatch = header.match(/name="(.+?)"/);
-    const filenameMatch = header.match(/filename="(.+?)"/);
-    const contentTypeMatch = header.match(/Content-Type: (.+)/);
-
-    const name = nameMatch?.[1];
-    const filename = filenameMatch?.[1];
-    const contentType = contentTypeMatch?.[1];
-
-    console.log("이름:", name);
-    console.log("파일명:", filename);
-    console.log("Content-Type:", contentType);
-
-    if (contentType?.includes("application/json")) {
-      try {
-        jsonData = JSON.parse(body);
-        console.log("파싱된 JSON:", jsonData);
-      } catch (error) {
-        console.error("JSON 파싱 오류:", error, "본문:", body);
-        throw error;
-      }
-    } else if (filename) {
-      const raw = new TextEncoder().encode(body);
-      const imageBlob = new Blob([raw], { type: contentType || "application/octet-stream" });
-      imageMap[filename] = imageBlob;
-      console.log("추가된 이미지 Blob:", filename, imageBlob);
-    }
-    console.log("--- 파트 끝 ---");
-  }
-
-  return { jsonData, imageMap };
-}
-
-// 이미지를 서버에 업로드하고 이미지 URL 배열을 반환하는 함수 // description: any; 
+// 이미지를 서버에 업로드하고 이미지 URL 배열을 반환하는 함수
 export async function uploadProductAndImages(images: File[], productInfo: { product_name: any; price: any; description: any; }, setUploadInfoResponse: React.Dispatch<React.SetStateAction<UploadInfoResponse | null>>) {
   const formData = new FormData();
   // 이미지 추가 전 유효성 검증
@@ -146,6 +75,7 @@ export async function uploadProductAndImages(images: File[], productInfo: { prod
   //console.log("- description:", String(productInfo.description || "설명"));
 
   try {
+    console.log(`upload-info 요청을 보내는 전체 URL: ${fastapiInstance.defaults.baseURL}/upload-info`);
     const response = await fastapiInstance.post("/upload-info", formData, {
       headers: {
         "Content-Type": "multipart/form-data",
@@ -169,7 +99,7 @@ export async function uploadProductAndImages(images: File[], productInfo: { prod
   }
 } 
 
-// 프론트엔드에 추가할 함수 - 기존 uploadProductAndImages 함수 아래에 추가
+// 프론트엔드에 추가할 함수 - 기존 uploadImagesToServer 함수 아래에 추가
 const generateSalesContent = async (
   classificationResults: ClassificationResult[] | null,
   detectionResults: DetectionResult[] | null, // Nullable 타입으로 변경
@@ -205,6 +135,7 @@ const generateSalesContent = async (
     };
 
     // 판매글 생성 API 호출 (요청 바디 구조 변경)
+    console.log(`generate-description 요청을 보내는 전체 URL: ${fastapiInstance.defaults.baseURL}/generate-description`);
     const response = await fastapiInstance.post('/generate-description', requestData, {
       headers: {
         'Content-Type': 'application/json', // 요청 Content-Type을 JSON으로 변경
@@ -278,7 +209,6 @@ const GoodsRegistrationPage: React.FC = () => {
         purchaseYear:
           editItem.purchaseDate?.split("-")[0] || currentYear.toString(),
         purchaseMonth: editItem.purchaseDate?.split("-")[1] || "0",
-        images: [] as File[],  // 빈 이미지 배열로 초기화
         imageUrls: editItem.imageUrls || [], // 기존 이미지 URL이 있으면 사용
       };
     } else {
@@ -295,7 +225,6 @@ const GoodsRegistrationPage: React.FC = () => {
         serialNumber: "",
         purchaseYear: currentYear.toString(),
         purchaseMonth: "0",
-        images: [] as File[],  // 빈 이미지 배열로 초기화
       };
     }
   });
@@ -304,7 +233,7 @@ const GoodsRegistrationPage: React.FC = () => {
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [isGenerated, setIsGenerated] = useState<boolean>(false);
 
-  const [uploadInfoResponse, setUploadInfoResponse] = useState<UploadInfoResponse | null>(null);
+	const [uploadInfoResponse, setUploadInfoResponse] = useState<UploadInfoResponse | null>(null);
   const imageRefs = useRef<(HTMLImageElement | null)[]>([]);
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
   // capturedImages 타입을 string[] 에서 { url: string; file: File }[] 로 변경
@@ -368,9 +297,6 @@ const GoodsRegistrationPage: React.FC = () => {
   //   }
   // };
   const [isCameraOpen, setIsCameraOpen] = useState(false);
-  
-  // 받아오는 이미지(객체탐지 결과)를 저장하는 const
-  const [imageMap, setImageMap] = useState<Record<string, Blob>>({});
   // 이미지 캡처 콜백
   function dataURLtoFile(dataurl: string, filename: string): File {
     const arr = dataurl.split(',');
@@ -395,14 +321,10 @@ const GoodsRegistrationPage: React.FC = () => {
     return new File([u8arr], filename, { type: mime });
   }
   const handleImageCapture = (imageDataUrl: string) => {
-  const filename = `capture-${Date.now()}.jpg`;
-  const file = dataURLtoFile(imageDataUrl, filename);
+    const filename = `capture-${Date.now()}.jpg`;
+    const file = dataURLtoFile(imageDataUrl, filename);
 
-  setCapturedImages(prev => [...prev, { url: imageDataUrl, file }]); // URL과 File 객체 모두 저장
-  setFormData(prev => ({
-    ...prev,
-    images: [...prev.images, file], // File 객체는 formData.images 에도 추가
-  }));
+    setCapturedImages(prev => [...prev, { url: imageDataUrl, file }]); // URL과 File 객체 모두 저장
   };
 
   // 판매글 생성 처리 - handleSubmit 함수 위에 추가
@@ -415,7 +337,7 @@ const GoodsRegistrationPage: React.FC = () => {
       formData.price <= 0 ||
       !formData.purchaseYear ||
       formData.serialNumber.trim().length === 0 ||
-      formData.images.length === 0
+      capturedImages.length === 0
     ) {
       alert("상품명, 가격, 구매 년도, 시리얼 번호는 필수 입력 항목이며, 최소 1장의 이미지가 필요합니다.");
       return;
@@ -429,14 +351,15 @@ const GoodsRegistrationPage: React.FC = () => {
         formData.purchaseMonth === "0"
           ? formData.purchaseYear
           : `${formData.purchaseYear}-${formData.purchaseMonth.padStart(2, "0")}`;
-
+			
+			// 1. 먼저 이미지를 업로드하고 객체 탐지 결과 받아오기
       let uploadResult: UploadInfoResponse | null = null;
-      // 1. 먼저 이미지를 업로드하고 객체 탐지 결과 받아오기
-      if (formData.images.length > 0) {
+      if (capturedImages.length > 0) {
         try {
-          console.log("이미지 업로드 시작, 이미지 수:", formData.images.length);
+          console.log("이미지 업로드 시작, 이미지 수:", capturedImages.length);
+          const filesToUpload = capturedImages.map(img => img.file);
           uploadResult = await uploadProductAndImages(
-            formData.images,
+            filesToUpload,
             {
               product_name: formData.title,
               price: formData.price.toString(),
@@ -452,9 +375,9 @@ const GoodsRegistrationPage: React.FC = () => {
           return;
         }
       }
-
-      // 2. 판매글 생성 API 호출 (변경된 파라미터 전달)
-      if (uploadResult?.classification_results && uploadResult?.classification_results.length === formData.images.length) {
+			
+      // 2. 판매글 생성 API 호출
+      if (uploadResult?.classification_results && uploadResult?.classification_results.length === capturedImages.length) {
         const imageFilenames = uploadResult.classification_results.map(res => res.original_filename || res.filename);
         const { title, description, imageUrls } = await generateSalesContent(
           uploadResult.classification_results,
@@ -495,15 +418,24 @@ const GoodsRegistrationPage: React.FC = () => {
     e.preventDefault();
 
     // 필수 필드 검증
-    if (
-      !formData.title.trim() ||
-      typeof formData.price !== "number" ||
-      isNaN(formData.price) ||
-      formData.price <= 0 ||
-      !formData.purchaseYear ||
-      formData.serialNumber.trim().length === 0
-    ) {
-      alert("상품명, 가격, 구매 년도, 시리얼 번호는 필수 입력 항목입니다.");
+    if (!formData.title.trim()) {
+      alert("상품명은 필수 입력 항목입니다.");
+      return;
+    }
+    if (!formData.purchaseYear) {
+      alert("구매 일자는 필수 입력 항목입니다.");
+      return;
+    }
+    if (formData.serialNumber.trim().length === 0) {
+      alert("시리얼 번호는 필수 입력 항목입니다.");
+      return;
+    }
+    if (formData.price <= 0) {
+      alert("가격은 필수 입력 항목입니다.");
+      return;
+    }
+    if (formData.description.trim().length === 0) {
+      alert("상품 설명은 필수 입력 항목입니다.");
       return;
     }
 
@@ -523,13 +455,6 @@ const GoodsRegistrationPage: React.FC = () => {
         finalDescription = `구성품 안내가 필요합니다. 어떤 구성품이 포함되어 있는지 작성해주세요.\n\n${finalDescription}`;
       }
 
-      // 구매일자 및 구성여부 정보 추가
-      // const packageTypeText = {
-      //   full: "풀박스",
-      //   single: "단품",
-      //   partial: "일부구성품",
-      // }[formData.configuration];
-
       console.log("formData.serialNumber:", formData.serialNumber);
 
       // 최종 설명에 구매일자와 구성여부 정보 포함
@@ -543,9 +468,8 @@ const GoodsRegistrationPage: React.FC = () => {
 
       // const date = kstDate.toISOString().replace("Z", "+09:00");
       // console.log(date); // 예: 2025-04-25T20:45:00+09:00
-      
-      
-      
+
+
       // 상품 등록 API 호출
       const submissionData = {
         ...formData,
@@ -554,7 +478,7 @@ const GoodsRegistrationPage: React.FC = () => {
         purchaseDate: purchaseDateString,
         createdAt: date.toString(),
         serialNumber: formData.serialNumber,
-        //imageUrls: imageUrls, // 업로드된 이미지 URL 배열 추가
+        imageUrls: formData.imageUrls, // 업로드된 이미지 URL 배열 추가
       };
 
       console.log("submission: ", submissionData);
@@ -810,7 +734,11 @@ const GoodsRegistrationPage: React.FC = () => {
 
                               ctx.fillStyle = fillColor;
                               ctx.font = '12px Arial';
-                              ctx.fillText(`${classNameKor} `, x_min, y_min - 5);
+                              ctx.fillText(
+                                `${classNameKor} `,
+                                x_min,
+                                y_min < 5 ? y_min + 15 : y_min - 5
+                              );
                             });
                           }
                         }}
@@ -825,6 +753,7 @@ const GoodsRegistrationPage: React.FC = () => {
               </div>
             </div>
           )}
+
 
           {/* 5. 직접 입력하는 상품설명 (맨 마지막) */}
           {isGenerated && (

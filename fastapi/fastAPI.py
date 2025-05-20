@@ -1,19 +1,15 @@
-import mimetypes
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from typing import List, Optional, Dict, Any
+import traceback
 import os
-import shutil
 import uvicorn
 import uuid
 import numpy as np
 import cv2
 import onnxruntime as ort
 from pydantic import BaseModel
-import base64
-from PIL import Image, ImageDraw
-import io
 
 # 추가: 환경변수 및 판매글 생성 관련 라이브러리
 import requests
@@ -24,6 +20,7 @@ from dotenv import load_dotenv
 # 환경변수 로드
 load_dotenv()
 fastapi_url = os.getenv("REACT_APP_FASTAPI_URL")
+front_url = "http://localhost:3000/"
 
 # API 설정
 GMS_API_KEY = os.getenv("GMS_API_KEY")
@@ -36,10 +33,10 @@ app = FastAPI(title="Product Image Processing API")
 # CORS 설정 (모든 origin 허용 – 배포 시에는 필요한 origin만 허용해야 함)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 배포 시에는 frontend 주소만 허용
+    allow_origins=[front_url],  # 배포 시에는 frontend 주소만 허용
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=[front_url],
+    allow_headers=[front_url],
 )
 
 # 업로드 및 결과 이미지 저장 경로 생성
@@ -568,8 +565,11 @@ async def upload_info_multipart(
     product_name: str = Form(...),
     price: str = Form(...),
     description: str = Form(...),
+    request: Request = None,  # FastAPI의 Request 객체 추가
 ):
-    print("upload-info 호출됨")
+    client_host = request.client.host if request and request.client else "알 수 없음"
+    print(f"upload-info 호출됨 - 클라이언트 IP: {client_host}")
+    print(f"요청 헤더: {request.headers if request else '알 수 없음'}")
     try:
         classification_results = []
         detection_results_all = [] # 모든 이미지의 탐지 결과를 담을 리스트
@@ -621,8 +621,12 @@ async def generate_description(request_data: GenerateDescriptionRequest):
         classification_results = request_data.classification_results or []
         detection_results_all = request_data.detection_results or []
         image_filenames = request_data.image_filenames or []
+        request: Request = None,  # FastAPI의 Request 객체 추가
 
-        print("✅ /generate-description 호출됨")
+        client_host = request.client.host if request and request.client else "알 수 없음"
+        print(f"generate-description 호출됨 - 클라이언트 IP: {client_host}")
+        print(f"요청 헤더: {request.headers if request else '알 수 없음'}")
+
         print("➡️ 받은 classification 결과:", classification_results)
         print("➡️ 받은 detection 결과:", detection_results_all)
         print("➡️ 받은 이미지 파일명:", image_filenames)

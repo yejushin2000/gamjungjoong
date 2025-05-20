@@ -4,7 +4,7 @@ import { useAuthStore } from "../stores/useUserStore";
 
 const fastapiInstance = axios.create({
   baseURL: process.env.REACT_APP_FASTAPI_URL, // 예: http://localhost:8000/
-  timeout: 20000,
+  timeout: 100000,
   headers: {
     "Content-Type": "application/json",
   },
