@@ -2,7 +2,6 @@ from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from typing import List, Optional, Dict, Any
-import traceback
 import os
 import uvicorn
 import uuid
@@ -20,7 +19,6 @@ from dotenv import load_dotenv
 # 환경변수 로드
 load_dotenv()
 fastapi_url = os.getenv("REACT_APP_FASTAPI_URL")
-front_url = "http://localhost:3000/"
 
 # API 설정
 GMS_API_KEY = os.getenv("GMS_API_KEY")
@@ -33,10 +31,10 @@ app = FastAPI(title="Product Image Processing API")
 # CORS 설정 (모든 origin 허용 – 배포 시에는 필요한 origin만 허용해야 함)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[front_url],  # 배포 시에는 frontend 주소만 허용
+    allow_origins=["*"],  # 배포 시에는 frontend 주소만 허용
     allow_credentials=True,
-    allow_methods=[front_url],
-    allow_headers=[front_url],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # 업로드 및 결과 이미지 저장 경로 생성
@@ -336,11 +334,12 @@ def format_scratch_data(detection_image_urls):
     """
     탐지 결과를 프롬프트용 scratch_data 형식으로 변환
     """
-    scratches = []
-    dents = []
+    damages = []  # 모든 손상을 하나의 리스트로 관리
     screen_condition = "완벽함"
     keyboard_condition = "완벽함"
-    overall_condition = "매우 우수함 (9.5/10)"
+    overall_condition = "매우 우수함"
+    
+    normal_parts = set()  # 정상으로 판단된 부위를 추적
     
     # 탐지된 객체를 분류하여 적절한 카테고리에 추가
     for detection_result in detection_image_urls:
@@ -350,11 +349,6 @@ def format_scratch_data(detection_image_urls):
             
             # 이미지 클래스 찾기 (원본 이미지 URL에 해당하는 분류 결과)
             original_url = detection_result.get("original_url", "")
-            image_class = "unknown"
-            
-            # 여기서는 classification_results가 글로벌 변수가 아니므로 찾을 수 없습니다.
-            # 실제 구현에서는 적절한 방법으로 이미지 클래스를 찾아야 합니다.
-            # 간단한 매핑으로 대체합니다.
             
             # 위치 매핑 (간단한 구현)
             if "front" in original_url:
@@ -371,57 +365,84 @@ def format_scratch_data(detection_image_urls):
                 # URL에서 클래스를 찾을 수 없으면 임의로 설정
                 location = class_name.lower()
             
-            # 상태의 심각도 결정 (confidence score를 기반으로)
-            if confidence > 0.8:
-                severity = "심각함"
-            elif confidence > 0.6:
-                severity = "보통"
-            elif confidence > 0.4:
-                severity = "경미함"
-            else:
-                severity = "매우 경미함"
+            # normal 클래스는 정상 부품으로 처리
+            if class_name == "normal":
+                normal_parts.add(location)
+                continue
             
-            # 클래스에 따라 적절한 카테고리에 추가
+            # 손상 정도와 설명 (클래스에 따라 다르게 처리)
+            description = ""
+            severity = ""
+            
             if class_name == "Scratch":
-                scratches.append({
-                    "location": f"{location}",
-                    "size": "약 1-2cm",
-                    "severity": severity
-                })
-            elif class_name in ["Crack", "Display Issues"]:
-                dents.append({
-                    "location": f"{location}",
-                    "size": "약 1-2cm",
-                    "severity": severity
-                })
-            
-            # 화면 상태 업데이트
-            if "screen" in location.lower() and class_name in ["Damaged Screen", "Display Issues"]:
-                screen_condition = "손상있음"
-            
-            # 키보드 상태 업데이트
-            if "keyboard" in location.lower() and class_name == "Damaged Keys":
+                severity = "경미함"
+                description = f"{location}에 스크래치가 있습니다. 사용에는 영향이 없습니다."
+            elif class_name == "Damaged Keys":
+                severity = "사용에 영향 있음"
                 keyboard_condition = "일부 손상있음"
+                description = f"{location}에 키 손상이 있습니다. 일부 키가 제대로 작동하지 않을 수 있습니다."
+            elif class_name == "Damaged Screen":
+                severity = "사용에 영향 있음"
+                screen_condition = "손상있음"
+                description = f"{location}에 화면 손상이 있습니다. 디스플레이 일부가 제대로 표시되지 않을 수 있습니다."
+            elif class_name == "Display Issues":
+                severity = "사용에 영향 있음"
+                screen_condition = "손상있음"
+                description = f"{location}에 디스플레이 문제가 있습니다. 색상 표현이나 밝기에 영향을 줄 수 있습니다."
+            else:  # 기타 손상
+                severity = "확인 필요"
+                description = f"{location}에 손상이 감지되었습니다. 자세한 확인이 필요합니다."
+            
+            # 손상 정보 추가
+            damages.append({
+                "type": class_name,
+                "location": location,
+                "description": description,
+                "severity": severity
+            })
     
-    # 전체 상태 점수 계산 (탐지된 문제 수에 따라)
-    total_issues = len(scratches) + len(dents)
-    if total_issues == 0:
-        overall_condition = "완벽한 상태 (10/10)"
-    elif total_issues <= 1:
-        overall_condition = "매우 우수함 (9/10)"
-    elif total_issues <= 3:
-        overall_condition = "우수함 (8/10)"
-    elif total_issues <= 5:
-        overall_condition = "양호함 (7/10)"
+    # 정상 부품 정보 추가
+    normal_desc = {
+        "상판": "상판은 정상 상태입니다. 특별한 손상이 없습니다.",
+        "하판": "하판은 정상 상태입니다. 특별한 손상이 없습니다.",
+        "측면": "측면은 정상 상태입니다. 특별한 손상이 없습니다.",
+        "키보드": "키보드는 완벽한 상태입니다. 모든 키가 정상 작동합니다.",
+        "화면": "화면은 완벽한 상태입니다. 디스플레이에 문제가 없습니다."
+    }
+    
+    # 정상으로 확인된 부품에 대한 정보 추가
+    for part in normal_parts:
+        if part in normal_desc:
+            damages.append({
+                "type": "normal",
+                "location": part,
+                "description": normal_desc[part],
+                "severity": "정상"
+            })
+            
+    # 전체 상태 설명 (탐지된 문제 수와 종류에 따라)
+    severe_issues = sum(1 for damage in damages if "영향 있음" in damage["severity"])
+    minor_issues = sum(1 for damage in damages if damage["severity"] == "경미함")
+    
+    if len(damages) == 0 or all(damage["type"] == "normal" for damage in damages):
+        overall_condition = "완벽한 상태"
+    elif severe_issues == 0 and minor_issues <= 2:
+        overall_condition = "매우 우수함"
+    elif severe_issues == 0 and minor_issues > 2:
+        overall_condition = "우수함"
+    elif severe_issues == 1:
+        overall_condition = "양호함"
+    elif severe_issues <= 3:
+        overall_condition = "사용감 있음"
     else:
-        overall_condition = "사용감 있음 (6/10)"
+        overall_condition = "상당한 사용감 있음"
     
     return {
-        "scratches": scratches,
-        "dents": dents,
+        "damages": damages,
         "screen_condition": screen_condition,
         "keyboard_condition": keyboard_condition,
-        "overall_condition": overall_condition
+        "overall_condition": overall_condition,
+        "normal_parts": list(normal_parts)  # 정상 부품 목록도 함께 반환
     }
 
 # 추가: ChatGPT를 사용하여 판매글 생성 함수
@@ -439,67 +460,75 @@ async def generate_sales_content(
     ChatGPT를 사용하여 중고 노트북 판매글 생성
     """
     # 프롬프트 작성
+    has_valid_specs = "정보없음" not in specs_text and "알 수 없음" not in specs_text
+
+    # 스펙 정보 포함 여부에 따른 조건부 텍스트
+    specs_header = "<노트북 상세 정보>\n" + specs_text if has_valid_specs else ""
+    specs_section_guide = "(아래 정보를 포함하여 작성)" if has_valid_specs else "(정확한 스펙 정보가 없으므로 이 섹션은 생략)"
+    specs_content = specs_text if has_valid_specs else ""
+    specs_principle = "스펙 정보는 specs_text에서 제공된 모든 항목을 누락 없이 포함할 것" if has_valid_specs else "스펙 정보는 검색된 정보가 있을 경우에만 포함"
+    final_instruction = "제공된 스펙 정보를 빠짐없이 활용하고, 이미지 분석 결과를 자연스럽게 통합하여 구매자가 제품 상태와 특징을 정확히 파악할 수 있는 판매글을 작성해줘." if has_valid_specs else "이미지 분석 결과를 자연스럽게 통합하여 구매자가 제품 상태와 특징을 정확히 파악할 수 있는 판매글을 작성해줘."
+
+    # 프롬프트 작성
     prompt = f"""
     노트북 정보와 이미지 분석 결과를 바탕으로 구매자에게 신뢰감을 주는 중고 거래 판매글을 작성해줘.
-    <노트북 상세 정보>
-    {specs_text}
     <구매 및 판매 정보>
     - 구매일자: {purchase_date}
     - 판매희망가격: {price}
     - 상품 구성: {"풀박스 (박스 및 모든 구성품 포함)" if configuration == 0 else "일부 구성품 포함" if configuration == 1 else "단품 (본체만)"}
     <상태 정보 (AI 자동 분석 결과)>
     {json.dumps(scratch_data, ensure_ascii=False, indent=2)}
+    {specs_header}
     판매글 작성 가이드:
     1. 제목: 
-       - 형식: "[브랜드명 모델명] 핵심 스펙 + 상태 + 구성" (60자 이내)
-       - 예시: "[삼성 갤럭시북5 Pro] i7/16GB/512GB 상태A급 풀박스"
-       - '제목:' 표시로 시작
+    - 형식: "[브랜드명 모델명] 핵심 스펙 + 상태 + 구성" (60자 이내)
+    - 예시: "[삼성 갤럭시북5 Pro] i7/16GB/512GB 상태A급 풀박스"
+    - '제목:' 표시로 시작
     2. 설명: (아래 섹션을 명확히 구분하여 작성)
-       - 제품 요약: 한눈에 볼 수 있는 핵심 정보 요약 (2-3줄)
-       
-       - 스펙 정보: (노트북 상세 정보에서 제공된 모든 정보를 반드시 포함)
-         • 브랜드 및 모델명
-         • CPU 정보 (브랜드, 모델)
-         • 메모리(RAM) 용량
-         • 저장 공간 정보
-         • 화면 크기 및 해상도
-         • 그래픽 카드 정보
-         • 배터리 용량/지속시간
-         • 무게
-         • OS 정보
-         • 기타 특징적인 스펙 (있을 경우)
-       
-       - 상태 정보:
-         • AI 분석된 흠집/덴트 정보를 자연스러운 문장으로 설명
-         • 위치별 상태 (상판, 하판, 측면, 후면, 키보드, 화면 등)
-         • 전체적인 외관 상태 점수 (10점 만점)
-         • 실제 사용에 미치는 영향 (있다면)
-       
-       - 사용 정보:
-         • 구매 시기와 실제 사용 기간
-         • 주 사용 용도와 사용 빈도
-         • 판매자 설명 (있을 경우 반드시 포함)
-       
-       - 구성품 정보:
-         • 포함된 구성품 목록 상세히 기재
-         • 원래 구성품 중 누락된 것이 있다면 명시
-       
-       - 판매 정보:
-         • 판매 희망가격과 네고 가능 여부
-         • 선호하는 거래 방식 언급
-    3. 작성 원칙:
-       - 스펙 정보는 specs_text에서 제공된 모든 항목을 누락 없이 포함할 것
-       - AI 분석된 상태 정보를 실제 상태로 자연스럽게 표현
-       - 장단점을 모두 정직하게 언급하여 신뢰감 형성
-       - 전문 용어는 일반 소비자가 이해하기 쉽게 설명
-       - 구매자 입장에서 궁금할 만한 정보 포함 (발열, 소음, 실사용 배터리 등)
-    4. 말투/톤:
-       - 중고거래 플랫폼에 맞는 친근하고 자연스러운 말투
-       - 전문성과 신뢰감을 주는 어조 유지
-       - 핵심 정보와 장점은 강조하여 표시
-    제공된 스펙 정보를 빠짐없이 활용하고, 이미지 분석 결과를 자연스럽게 통합하여 구매자가 제품 상태와 특징을 정확히 파악할 수 있는 판매글을 작성해줘.
-    """
+    - 제품 요약: 한눈에 볼 수 있는 핵심 정보 요약 (2-3줄)
     
+    - 스펙 정보: {specs_section_guide}
+        {specs_content}
+    
+    - 상태 정보:
+        • AI 분석된 손상 정보를 자연스러운 문장으로 설명
+        • 위치별 상태 (상판, 하판, 측면, 후면, 키보드, 화면 등)
+        • 전체적인 외관 상태를 서술적으로 설명 (점수 없이)
+        • 실제 사용에 미치는 영향 (있다면)
+    
+    - 사용 정보:
+        • 구매 시기와 실제 사용 기간
+        • 주 사용 용도와 사용 빈도
+        • 판매자 설명 (있을 경우 반드시 포함)
+    
+    - 구성품 정보:
+        • 포함된 구성품 목록 상세히 기재
+        • 원래 구성품 중 누락된 것이 있다면 명시
+    
+    - 판매 정보:
+        • 판매 희망가격과 네고 가능 여부
+        • 선호하는 거래 방식 언급
+    3. 작성 원칙:
+    - {specs_principle}
+    - AI 분석된 상태 정보를 실제 상태로 자연스럽게 표현
+    - 장단점을 모두 정직하게 언급하여 신뢰감 형성
+    - 전문 용어는 일반 소비자가 이해하기 쉽게 설명
+    - 구매자 입장에서 궁금할 만한 정보 포함 (발열, 소음, 실사용 배터리 등)
+    - 절대로 상태 점수를 숫자로 표현하지 말 것 (예: "7/10" 같은 표현 사용 금지)
+    - Markdown 형식 사용하지 말 것 (*, #, -, ** 등의 마크다운 기호를 사용하지 말 것)
+    - 일반 텍스트로만 출력할 것 (섹션 구분은 줄바꿈으로만 하고, 강조는 마크다운 대신 문장으로 표현)
+    4. 형식:
+    - 각 섹션은 "제품 요약:", "스펙 정보:", "상태 정보:", "사용 정보:", "구성품 정보:", "판매 정보:" 형식으로 시작
+    - 각 섹션 사이에는 빈 줄 하나만 사용
+    - 불릿 포인트는 '•' 또는 '-' 대신 간단히 줄바꿈으로 구분
+    - 강조가 필요한 경우 ** 또는 * 대신 자연스러운 문장으로 표현 (예: "특히 중요한 점은...")
+    5. 말투/톤:
+    - 중고거래 플랫폼에 맞는 친근하고 자연스러운 말투
+    - 전문성과 신뢰감을 주는 어조 유지
+    - 핵심 정보와 장점은 강조하여 표시
+    {final_instruction}
+    """
+        
     # ChatGPT API 요청 데이터
     data = {
         "model": "gpt-4o-mini",
@@ -565,11 +594,8 @@ async def upload_info_multipart(
     product_name: str = Form(...),
     price: str = Form(...),
     description: str = Form(...),
-    request: Request = None,  # FastAPI의 Request 객체 추가
 ):
-    client_host = request.client.host if request and request.client else "알 수 없음"
-    print(f"upload-info 호출됨 - 클라이언트 IP: {client_host}")
-    print(f"요청 헤더: {request.headers if request else '알 수 없음'}")
+    print("upload-info 호출됨")
     try:
         classification_results = []
         detection_results_all = [] # 모든 이미지의 탐지 결과를 담을 리스트
@@ -621,12 +647,8 @@ async def generate_description(request_data: GenerateDescriptionRequest):
         classification_results = request_data.classification_results or []
         detection_results_all = request_data.detection_results or []
         image_filenames = request_data.image_filenames or []
-        request: Request = None,  # FastAPI의 Request 객체 추가
 
-        client_host = request.client.host if request and request.client else "알 수 없음"
-        print(f"generate-description 호출됨 - 클라이언트 IP: {client_host}")
-        print(f"요청 헤더: {request.headers if request else '알 수 없음'}")
-
+        print("✅ /generate-description 호출됨")
         print("➡️ 받은 classification 결과:", classification_results)
         print("➡️ 받은 detection 결과:", detection_results_all)
         print("➡️ 받은 이미지 파일명:", image_filenames)
@@ -670,16 +692,16 @@ async def generate_description(request_data: GenerateDescriptionRequest):
 
             if laptop is not None:
                 specs_text = f"""
-        • 브랜드: {laptop.get('브랜드', '정보없음')}
-        • 모델: {laptop.get('제품군', product_name)}
-        • 화면: {laptop.get('화면 크기', '정보없음')} ({laptop.get('해상도', '정보없음')})
-        • CPU: {laptop.get('CPU 브랜드', '정보없음')} {laptop.get('CPU 모델', '정보없음')}
-        • 그래픽: {laptop.get('GPU 타입', '정보없음')} {laptop.get('GPU 카드', '정보없음')}
-        • 메모리: {laptop.get('RAM', '정보없음')}
-        • 저장 공간: {laptop.get('저장 용량', '정보없음')}
-        • 배터리: {laptop.get('배터리', '정보없음')}
-        • 무게: {laptop.get('무게', '정보없음')}
-        • OS: {laptop.get('os', '정보없음')}
+                • 브랜드: {laptop.get('브랜드', '정보없음')}
+                • 모델: {laptop.get('제품군', product_name)}
+                • 화면: {laptop.get('화면 크기', '정보없음')} ({laptop.get('해상도', '정보없음')})
+                • CPU: {laptop.get('CPU 브랜드', '정보없음')} {laptop.get('CPU 모델', '정보없음')}
+                • 그래픽: {laptop.get('GPU 타입', '정보없음')} {laptop.get('GPU 카드', '정보없음')}
+                • 메모리: {laptop.get('RAM', '정보없음')}
+                • 저장 공간: {laptop.get('저장 용량', '정보없음')}
+                • 배터리: {laptop.get('배터리', '정보없음')}
+                • 무게: {laptop.get('무게', '정보없음')}
+                • OS: {laptop.get('os', '정보없음')}
                 """
         except Exception as e:
             print(f"CSV 검색 실패: {e}")
