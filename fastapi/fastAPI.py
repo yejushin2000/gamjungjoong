@@ -111,7 +111,7 @@ class ModelManager:
         image = cv2.resize(image, size)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         image = image.astype(np.float32) / 255.0
-        image = np.transpose(image, (2, 0, 1))  # HWC -> CHW
+        #image = np.transpose(image, (2, 0, 1))  # HWC -> CHW
         image = np.expand_dims(image, axis=0)  # 배치 차원 추가
         return image
     
