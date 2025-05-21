@@ -269,6 +269,10 @@ class ModelManager:
                 x_max = int((cx + w / 2) / self.img_size * original_width)
                 y_max = int((cy + h / 2) / self.img_size * original_height)
                 
+                # normal인 경우, 화면에 표시할 필요가 없기 때문에 입력하지 않기
+                if (self.detection_classes[class_id] == "normal"):
+                    continue
+
                 boxes.append({
                     "class": self.detection_classes[class_id],
                     "confidence": float(confidence),
@@ -508,6 +512,7 @@ async def generate_sales_content(
     - 판매 정보:
         • 판매 희망가격과 네고 가능 여부
         • 선호하는 거래 방식 언급
+        • 가격은 만원 붙이지 말고 그냥 원 단위로 기재
     3. 작성 원칙:
     - {specs_principle}
     - AI 분석된 상태 정보를 실제 상태로 자연스럽게 표현
