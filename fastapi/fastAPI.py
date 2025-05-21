@@ -1,8 +1,7 @@
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Request
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from typing import List, Optional, Dict, Any
-import traceback
 import os
 import uvicorn
 import uuid
@@ -19,8 +18,6 @@ from dotenv import load_dotenv
 
 # 환경변수 로드
 load_dotenv()
-fastapi_url = os.getenv("REACT_APP_FASTAPI_URL")
-front_url = "http://localhost:3000/"
 
 # API 설정
 GMS_API_KEY = os.getenv("GMS_API_KEY")
@@ -33,10 +30,10 @@ app = FastAPI(title="Product Image Processing API")
 # CORS 설정 (모든 origin 허용 – 배포 시에는 필요한 origin만 허용해야 함)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[front_url],  # 배포 시에는 frontend 주소만 허용
+    allow_origins=["*"],  # 배포 시에는 frontend 주소만 허용
     allow_credentials=True,
-    allow_methods=[front_url],
-    allow_headers=[front_url],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # 업로드 및 결과 이미지 저장 경로 생성
@@ -81,31 +78,6 @@ def calculate_iou(box1, box2):
         return 0
     return intersection_area / union_area
 
-# 멀티파트 형식으로 응답을 보내는 함수
-def create_multipart_response(json_data, image_data_list):
-    boundary = "boundary"
-    async def generate():
-        # JSON 데이터 부분 (기존과 동일)
-        yield (f"--{boundary}\r\n"
-               f"Content-Disposition: form-data; name=\"json_data\"\r\n"
-               f"Content-Type: application/json\r\n\r\n"
-               f"{json.dumps(json_data)}\r\n")
-
-        # 이미지 데이터 부분 (경로 대신 메모리 데이터 사용)
-        for img_name, img_bytes in image_data_list:
-            mime_type = "image/jpeg"  # 또는 실제 MIME 타입에 따라 설정
-            yield (f"--{boundary}\r\n"
-                   f"Content-Disposition: form-data; name=\"{img_name}\"; filename=\"{img_name.split('_')[-1]}.jpg\"\r\n"
-                   f"Content-Type: {mime_type}\r\n\r\n")
-            yield img_bytes
-            yield b'\r\n'
-
-        yield f"--{boundary}--\r\n"
-
-    return StreamingResponse(
-        generate(),
-        media_type=f"multipart/form-data; boundary={boundary}"
-    )
 
 # 모델 관리 클래스 정의
 class ModelManager:
@@ -118,15 +90,6 @@ class ModelManager:
         # 분류 및 탐지 클래스 이름 목록
         self.classification_classes = ["back", "front", "keyboard", "screen", "side"]
         self.detection_classes = ['Damaged Keys', 'Damaged Screen', 'Display Issues', 'Scratch', 'normal']
-
-        # 각 클래스별 색상 정의 (R, G, B 형식)
-        self.detection_colors = {
-            'Damaged Keys': (255, 0, 0),     # 빨강
-            'Damaged Screen': (0, 0, 255),   # 파랑
-            'Display Issues': (255, 165, 0), # 주황
-            'Scratch': (0, 255, 0),          # 초록
-            'normal': (128, 128, 128)        # 회색
-        }
     
     def init_models(self):
         # ONNX 모델 로드
@@ -271,6 +234,10 @@ class ModelManager:
                 x_max = int((cx + w / 2) / self.img_size * original_width)
                 y_max = int((cy + h / 2) / self.img_size * original_height)
                 
+                # normal인 경우, 화면에 표시할 필요가 없기 때문에 입력하지 않기
+                if (self.detection_classes[class_id] == "normal"):
+                    continue
+
                 boxes.append({
                     "class": self.detection_classes[class_id],
                     "confidence": float(confidence),
@@ -285,51 +252,21 @@ class ModelManager:
         except Exception as e:
             print(f"Detection error: {e}")
             return []
-    
-    def draw_detections(self, image, detections):
-        """탐지된 객체에 대한 바운딩 박스를 이미지에 그리기 (클래스별 색상 적용)"""
-        image_copy = image.copy()
-        
-        for detection in detections:
-            class_name = detection["class"]
-            bbox = detection["bbox"]
-            confidence = detection["confidence"]
-            
-            # 클래스에 따른 색상 선택 (RGB -> BGR 변환)
-            color = self.detection_colors.get(class_name, (255, 0, 0))  # 기본값은 빨간색
-            color_bgr = (color[2], color[1], color[0])  # RGB -> BGR
-            
-            # 바운딩 박스 그리기
-            x_min, y_min, x_max, y_max = bbox
-            cv2.rectangle(image_copy, (x_min, y_min), (x_max, y_max), color_bgr, 2)
-            
-            # 텍스트 준비
-            label = f"{class_name} {confidence:.2f}"
-            
-            # 텍스트 크기 계산
-            (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            
-            # 텍스트 배경 그리기
-            cv2.rectangle(image_copy, (x_min, y_min - text_height - 10), (x_min + text_width, y_min), color_bgr, -1)
-            
-            # 텍스트 그리기 (흰색으로)
-            cv2.putText(image_copy, label, (x_min, y_min - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        return image_copy
+
 
 # 모델 매니저 인스턴스 생성
 model_manager = ModelManager()
 
 # 새로운 요청 바디 모델 정의
 class GenerateDescriptionRequest(BaseModel):
-    classification_results: Optional[List[Dict[str, Any]]] = []
-    detection_results: Optional[List[Dict[str, Any]]] = []
-    image_filenames: Optional[List[str]] = []
     product_name: str
     price: str
     purchase_date: Optional[str] = ""
     serial_number: Optional[str] = ""
     configuration: Optional[int] = 1
+    classification_results: Optional[List[Dict[str, Any]]] = []
+    detection_results: Optional[List[Dict[str, Any]]] = []
+    image_filenames: Optional[List[str]] = []
 
 # 손상 상태를 프롬프트 형식으로 변환하는 함수
 def format_scratch_data(detection_image_urls):
@@ -565,11 +502,8 @@ async def upload_info_multipart(
     product_name: str = Form(...),
     price: str = Form(...),
     description: str = Form(...),
-    request: Request = None,  # FastAPI의 Request 객체 추가
 ):
-    client_host = request.client.host if request and request.client else "알 수 없음"
-    print(f"upload-info 호출됨 - 클라이언트 IP: {client_host}")
-    print(f"요청 헤더: {request.headers if request else '알 수 없음'}")
+    print("upload-info 호출됨")
     try:
         classification_results = []
         detection_results_all = [] # 모든 이미지의 탐지 결과를 담을 리스트
@@ -621,12 +555,8 @@ async def generate_description(request_data: GenerateDescriptionRequest):
         classification_results = request_data.classification_results or []
         detection_results_all = request_data.detection_results or []
         image_filenames = request_data.image_filenames or []
-        request: Request = None,  # FastAPI의 Request 객체 추가
 
-        client_host = request.client.host if request and request.client else "알 수 없음"
-        print(f"generate-description 호출됨 - 클라이언트 IP: {client_host}")
-        print(f"요청 헤더: {request.headers if request else '알 수 없음'}")
-
+        print("✅ /generate-description 호출됨")
         print("➡️ 받은 classification 결과:", classification_results)
         print("➡️ 받은 detection 결과:", detection_results_all)
         print("➡️ 받은 이미지 파일명:", image_filenames)
