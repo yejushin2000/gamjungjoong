@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from typing import List, Optional, Dict, Any
@@ -79,6 +79,31 @@ def calculate_iou(box1, box2):
         return 0
     return intersection_area / union_area
 
+# 멀티파트 형식으로 응답을 보내는 함수
+def create_multipart_response(json_data, image_data_list):
+    boundary = "boundary"
+    async def generate():
+        # JSON 데이터 부분 (기존과 동일)
+        yield (f"--{boundary}\r\n"
+               f"Content-Disposition: form-data; name=\"json_data\"\r\n"
+               f"Content-Type: application/json\r\n\r\n"
+               f"{json.dumps(json_data)}\r\n")
+
+        # 이미지 데이터 부분 (경로 대신 메모리 데이터 사용)
+        for img_name, img_bytes in image_data_list:
+            mime_type = "image/jpeg"  # 또는 실제 MIME 타입에 따라 설정
+            yield (f"--{boundary}\r\n"
+                   f"Content-Disposition: form-data; name=\"{img_name}\"; filename=\"{img_name.split('_')[-1]}.jpg\"\r\n"
+                   f"Content-Type: {mime_type}\r\n\r\n")
+            yield img_bytes
+            yield b'\r\n'
+
+        yield f"--{boundary}--\r\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type=f"multipart/form-data; boundary={boundary}"
+    )
 
 # 모델 관리 클래스 정의
 class ModelManager:
@@ -254,20 +279,19 @@ class ModelManager:
             print(f"Detection error: {e}")
             return []
 
-
 # 모델 매니저 인스턴스 생성
 model_manager = ModelManager()
 
 # 새로운 요청 바디 모델 정의
 class GenerateDescriptionRequest(BaseModel):
+    classification_results: Optional[List[Dict[str, Any]]] = []
+    detection_results: Optional[List[Dict[str, Any]]] = []
+    image_filenames: Optional[List[str]] = []
     product_name: str
     price: str
     purchase_date: Optional[str] = ""
     serial_number: Optional[str] = ""
     configuration: Optional[int] = 1
-    classification_results: Optional[List[Dict[str, Any]]] = []
-    detection_results: Optional[List[Dict[str, Any]]] = []
-    image_filenames: Optional[List[str]] = []
 
 # 손상 상태를 프롬프트 형식으로 변환하는 함수
 def format_scratch_data(detection_image_urls):
@@ -621,7 +645,7 @@ async def generate_description(request_data: GenerateDescriptionRequest):
         # 시리얼 넘버로 정보 검색 시도 (기존 로직 활용)
         try:
             try:
-                df = pd.read_csv('Laptop.csv')
+                df = pd.read_csv('Laptop.csv', encoding='utf-8')
             except:
                 df = pd.read_csv('Laptop.csv', encoding='cp949')
 
